@@ -1,0 +1,33 @@
+# ROMs — never commit (copyright). Users provide their own.
+roms/*
+!roms/.gitkeep
+*.gb
+*.gbc
+*.gba
+
+# Emulator save states
+*.state
+*.sav
+
+# Agent run outputs (screenshots, logs, trajectories)
+runs/
+
+# Throwaway test screenshots written to the repo root
+test_frame.png
+before.png
+after.png
+
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# Secrets / local config
+.env
+*.local
+
+# OS
+.DS_Store
+Thumbs.db
