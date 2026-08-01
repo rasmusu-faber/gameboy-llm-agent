@@ -16,6 +16,7 @@ runs/
 test_frame.png
 before.png
 after.png
+vision_test.png
 
 # Python
 __pycache__/
