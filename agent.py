@@ -11,11 +11,10 @@ from pathlib import Path
 import ollama
 from pyboy import PyBoy
 
-from perception import player_position
+from perception import player_position, dialog_open
 
 ROM = "roms/Deadeus.gb"
 MODEL = "llama3.2:3b"
-INTRO_A = 300
 MAX_STEPS = 25
 OUT = Path("runs/nav")
 
@@ -38,6 +37,41 @@ def press(pyboy, button, times=1, hold=6, wait=16):
         pyboy.button_release(button)
         for _ in range(wait):
             pyboy.tick()
+
+
+def _reversible_move(pyboy, fwd, back):
+    """True if pressing fwd changes the player position and back returns it -
+    i.e. real player control, not a cutscene animation."""
+    p0 = player_position(pyboy)
+    press(pyboy, fwd)
+    p1 = player_position(pyboy)
+    press(pyboy, back)
+    return p1 != p0 and player_position(pyboy) == p0
+
+
+def skip_intro(pyboy, max_steps=600):
+    """Autonomously click through the title + intro into the movable game.
+
+    Deterministic (no LLM): press A while a dialog is on-screen, and detect
+    arrival with a reversible movement test. Movement tests start only after the
+    title menu, so a direction never nudges a menu cursor. Returns the step it
+    arrived on, or None if it never became movable.
+    """
+    press(pyboy, "start")
+    streak = 0
+    for step in range(1, max_steps + 1):
+        if dialog_open(pyboy):
+            streak = 0
+            press(pyboy, "a")
+        else:
+            streak += 1
+            if step > 20 and streak >= 3 and (
+                _reversible_move(pyboy, "right", "left")
+                or _reversible_move(pyboy, "down", "up")
+            ):
+                return step
+            press(pyboy, "a")
+    return None
 
 
 def greedy(dx, dy):
@@ -75,10 +109,8 @@ def main():
     pyboy = PyBoy(ROM, window="null")
     for _ in range(600):
         pyboy.tick()
-    press(pyboy, "start", times=2)
-    press(pyboy, "a", times=INTRO_A)
-    for _ in range(30):
-        pyboy.tick()
+    arrived = skip_intro(pyboy)
+    print(f"skip_intro: reached the game at step {arrived}")
 
     x0, y0 = player_position(pyboy)
     # Target: 2 tiles right and 2 tiles up, clamped to the room bounds we found

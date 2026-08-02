@@ -20,7 +20,7 @@ LLM. A hands-on learning project about building LLM agents.
    - player position from RAM (`perception.player_position`) ✅
    - on-screen text + dialog state from the tilemap (`perception.read_text`) ✅
 4. **Autonomy** — use the dialog/screen-state signal so the agent clears menus
-   and dialogue itself, replacing the scripted intro skip. ⏳
+   and dialogue itself, replacing the scripted intro skip. ✅
 5. **Playing** — larger goals: navigate between rooms, progress the game. ⏳
 6. **Part 2 (separate)** — an RL agent on the same task, then an LLM-vs-RL
    comparison.
@@ -205,6 +205,30 @@ That evolution is the point; the log is not rewritten to hide it.
   `I have given you / all this gift of / life` from the intro - and caught a
   third line that manual capture had missed. The agent now has complete
   model-free perception: player position + on-screen text + dialog state.
+- **Autonomous intro skip.** Instead of a fixed ~300 A-presses, the agent
+  presses A while a dialog is on-screen (WY-gated) and detects arrival with a
+  *reversible* movement test (press right, position changes, press left, it
+  returns = real player control, not animation). It reaches the movable room on
+  its own at ~step 94 - fewer inputs than the hard-coded guess - verified by
+  position (56,104) + screenshot + dialog closed. Movement tests are withheld
+  until past the title menu so a direction never nudges a menu cursor.
+- **The LLM navigation is the flaky part.** With `skip_intro` wired in, a full
+  autonomous run reaches the room fine, but the `llama3.2:3b` navigation then
+  walked into a corner and got stuck for 20 steps - it chose `down`/`right` when
+  it needed `up`/`left` (mis-read the `dy` sign) and never noticed it was pinned
+  against walls (distance 32 -> 48). An earlier run *had* reached the target, so
+  the 3B model is simply inconsistent at spatial reasoning. The lesson mirrors
+  the whole project: deterministic reflex code (`skip_intro`) is rock-solid; the
+  model is the weak link. Options: stuck-detection + greedy fallback, a clearer
+  prompt, or a stronger (cloud) model for decisions.
+- **A/B test: swapping the local model did NOT fix it.** Tried `qwen2.5:3b` (a
+  stronger small model) as a drop-in, same task, nothing else changed. It failed
+  the same way - went `down` when the target was `up` - and then repeated `down`
+  22 times against a wall (distance 32 -> 24, then frozen). Both 3B models make
+  the *same* directional error, which points at the **prompt** (the `dy` sign
+  convention forces a double-negative) plus the missing **stuck-detection**, not
+  the model. Takeaway: fix the prompt + add stuck-detection first; model choice
+  is secondary. Reverted to `llama3.2:3b` since the swap wasn't justified.
 - **Small, verified steps.** Each capability (load ROM, press buttons, LLM
   decision, vision) was proven in isolation with its own `test_*.py` script
   before being wired into a loop.

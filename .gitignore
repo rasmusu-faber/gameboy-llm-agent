@@ -29,6 +29,9 @@ venv/
 .env
 *.local
 
+# Internal handoff / working notes (not part of the public repo)
+HANDOFF.md
+
 # OS
 .DS_Store
 Thumbs.db
