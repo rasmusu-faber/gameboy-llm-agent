@@ -1,28 +1,34 @@
 # pokemon-llm-agent
 
-An LLM agent that autonomously plays a Game Boy game — a hands-on learning
-project about building LLM agents.
+An LLM agent that autonomously plays a **Game Boy game**, perceiving the world
+purely from emulator memory — no vision model — and deciding moves with a local
+LLM. A hands-on learning project about building LLM agents.
 
-The agent has three parts:
+> **On the name / origin.** This began as an idea for a Pokémon Red agent. It
+> pivoted to **Deadeus**, a free and open-source Game Boy homebrew game, because
+> Deadeus is fully legal to distribute — so the project can be published as open
+> source — while the techniques (reading state from RAM, decoding the tilemap)
+> are exactly the same. Pokémon Red is now an *optional* later target, not the
+> goal. The repo name is kept for continuity.
 
-- **Eye** — reads the emulator screen (later: game state straight from RAM)
-- **Hand** — presses Game Boy buttons from code
-- **Brain** — a local LLM (via Ollama) that picks one action per step as JSON
+## The plan
 
-The long-term goal is to play the classic **Pokémon Red** by reading the game
-state from the emulator's RAM. Development currently uses **Deadeus**, a free
-open-source Game Boy homebrew game, as a legal test bed.
+1. **Hand** — press buttons and drive the emulator (PyBoy). ✅
+2. **Brain** — a local LLM (`llama3.2:3b` via Ollama) picks one action per step
+   as JSON. ✅
+3. **Eye, without a vision model** — read game state directly:
+   - player position from RAM (`perception.player_position`) ✅
+   - on-screen text + dialog state from the tilemap — *next* ⏳
+4. **Autonomy** — use the dialog/screen-state signal so the agent clears menus
+   and dialogue itself, replacing the scripted intro skip. ⏳
+5. **Playing** — larger goals: navigate between rooms, progress the game. ⏳
+6. **Part 2 (separate)** — an RL agent on the same task, then an LLM-vs-RL
+   comparison.
 
-## Status
-
-- [x] Emulator + ROM loading (PyBoy)
-- [x] Button control ("hand")
-- [x] LLM decision as JSON ("brain", `llama3.2:3b` via Ollama)
-- [x] First agent loop wiring all three together (placeholder eye)
-- [x] Real perception ("eye"): local vision model (moondream) sees the screen
-- [x] Vision agent loop: single VLM sees *and* decides (approach 1)
-- [ ] Evaluate how far the tiny local VLM gets; if too weak, move to cloud vision
-- [ ] Swappable cloud backend (e.g. Groq / Gemini) for higher-quality runs
+**Why no vision model:** a small local vision model was tried and was far too
+slow on this hardware (minutes per step). Reading RAM + the tilemap is instant,
+free, and local. The full reasoning — including the dead-ends — is in the design
+log below.
 
 ## Setup
 
@@ -41,28 +47,46 @@ ollama pull llama3.2:3b
 
 ⚠️ **ROMs are not included in this repo, and must not be.**
 
-For development, download the free, open-source **Deadeus** ROM from the
-developer's page (<https://izma.itch.io/deadeus>) and place it at
-`roms/Deadeus.gb`.
+Download the free, open-source **Deadeus** ROM from the developer's page
+(<https://izma.itch.io/deadeus>) and place it at `roms/Deadeus.gb`.
 
-The eventual Pokémon Red target requires a ROM you dump legally from a
-cartridge you own. Downloading commercial ROMs from the internet is copyright
-infringement and is not supported here.
+(If you ever point this at the optional Pokémon Red target, that ROM must be one
+you dump legally from a cartridge you own — downloading commercial ROMs is
+copyright infringement and is not supported here.)
 
-## Scripts
+## Project structure
 
-| Script | Purpose |
-|---|---|
-| `test_rom.py` | Boot the ROM headless and save a screenshot |
-| `test_buttons.py` | Prove button input works (before/after screenshots) |
-| `test_llm.py` | Prove the local LLM returns a valid JSON action |
-| `test_vision.py` | Prove a vision model can describe the actual screen |
-| `agent_loop.py` | First agent loop, placeholder eye (goal + history only) |
-| `agent_vision_loop.py` | Vision agent loop: one VLM sees *and* decides (approach 1) |
+```
+pokemon-llm-agent/
+├── perception.py     # the "eye": player position from RAM + tilemap helpers
+├── agent.py          # navigation agent: reads position, LLM picks moves to a target
+├── tests/            # smoke tests: prove one capability each
+│   ├── test_rom.py       # boot the ROM headless and save a screenshot
+│   ├── test_buttons.py   # button input works (before/after screenshots)
+│   ├── test_llm.py       # local LLM returns a valid JSON action
+│   └── test_vision.py    # a vision model can describe the actual screen
+└── exploration/      # the "workshop": one-off reverse-engineering probes whose
+                      #   findings now live in perception.py + the design log
+    ├── test_ram_scan.py     # scan work RAM for the player position bytes
+    ├── test_ram_track.py    # live per-press tracking to confirm candidates
+    ├── test_y_scan.py       # focused rescan that pinned player Y
+    ├── test_reach_game.py   # how many inputs to clear the intro
+    ├── test_tilemap.py      # read on-screen text from the tilemap
+    ├── test_screen_state.py # tilemap-based dialog/screen-state detector
+    ├── test_window_dump.py  # dump the window tilemap for comparison
+    ├── test_window_pos.py   # read the window position registers (WX/WY)
+    └── agent_vision_loop.py # local vision agent (approach 1, too slow - reference)
+```
+
+Run everything from the repo root (paths like `roms/Deadeus.gb` are relative to
+it), e.g. `python agent.py` or `python exploration/test_ram_scan.py`.
 
 ## Design decisions
 
-A running log of the choices behind this project and why they were made.
+A running log of the choices behind this project and why they were made, in
+**chronological order** — the earliest entries capture early thinking (Pokémon
+as the target, a vision-model eye) that later entries deliberately supersede.
+That evolution is the point; the log is not rewritten to hide it.
 
 - **Test bed is Deadeus, not Pokémon (yet).** The end goal is Pokémon Red, but
   its ROM is copyrighted and only legal to obtain by dumping a cartridge you
@@ -143,8 +167,3 @@ A running log of the choices behind this project and why they were made.
 - **Small, verified steps.** Each capability (load ROM, press buttons, LLM
   decision, vision) was proven in isolation with its own `test_*.py` script
   before being wired into a loop.
-
-## Roadmap
-
-Part 2 (later, separate repo): an RL agent on the same task, followed by a
-method comparison of the LLM agent vs. RL.

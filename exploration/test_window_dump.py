@@ -6,6 +6,10 @@ from pathlib import Path
 
 from pyboy import PyBoy
 
+# This probe lives in exploration/; make the repo root importable for perception
+import sys
+import pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from perception import window_enabled
 
 ROM = "roms/Deadeus.gb"
