@@ -18,7 +18,7 @@ LLM. A hands-on learning project about building LLM agents.
    as JSON. ✅
 3. **Eye, without a vision model** — read game state directly:
    - player position from RAM (`perception.player_position`) ✅
-   - on-screen text + dialog state from the tilemap — *next* ⏳
+   - on-screen text + dialog state from the tilemap (`perception.read_text`) ✅
 4. **Autonomy** — use the dialog/screen-state signal so the agent clears menus
    and dialogue itself, replacing the scripted intro skip. ⏳
 5. **Playing** — larger goals: navigate between rooms, progress the game. ⏳
@@ -49,10 +49,6 @@ ollama pull llama3.2:3b
 
 Download the free, open-source **Deadeus** ROM from the developer's page
 (<https://izma.itch.io/deadeus>) and place it at `roms/Deadeus.gb`.
-
-(If you ever point this at the optional Pokémon Red target, that ROM must be one
-you dump legally from a cartridge you own — downloading commercial ROMs is
-copyright infringement and is not supported here.)
 
 ## Project structure
 
@@ -164,6 +160,51 @@ That evolution is the point; the log is not rewritten to hide it.
   In the first run it reached the target (Manhattan distance 32 -> 0 in 6
   moves), with one suboptimal move along the way - the small model is not
   optimal but recovers. Fully local, instant, free, no rate limits.
+- **Text reading (phase A): hash the glyph bitmap, not the tile index.** Pulled
+  each window text tile's 8x8 bitmap from PyBoy (`tile.ndarray()` is a method in
+  this version), binarized it, and hashed it. The same on-screen letter yields
+  the same hash even though GB Studio streams it into different tile indices -
+  `a`, `h`, `i`, `v`, `e` and space all matched across positions and across two
+  text rows. One dialog already yielded ~13 distinct characters. Confirms the
+  deterministic, model-free reader; next is assembling a `{hash: char}` table.
+- **Text reading (phase B): a disciplined font table.** Captured several intro
+  screens and assembled `deadeus_font.json` (`{glyph-hash: char}`) only from
+  double-checked evidence: the visible dialog "I have given you / all thi", plus
+  self-validating words like "Continue" and "..." that spell out correctly using
+  already-confirmed letters. Off-screen/stale window text (checkpoints where the
+  box was parked) was cross-checked against decoded English before being
+  trusted. A denser intro sweep then decoded the whole opening monologue with
+  the partial table, and the remaining `?` gaps were filled from context (`debt
+  be repaid`, `check`, `Nightmare`, ...), each new glyph confirmed by a real
+  word. The table now covers ~35 characters (the full intro alphabet), including
+  a case distinction found this way: `M` (in "My Child") and `m` (in
+  "Nightmare") are different glyphs with different hashes. Unknown glyphs still
+  read as `?`. Aside: the "The First Day" card is on the background layer, so the
+  window held stale text beneath.
+- **Can the font's order fill the gaps? Not from VRAM.** Tested whether the font
+  sits in VRAM in ASCII order (so `tile[base + ord(c)]` would yield every glyph).
+  It does not: GB Studio streams glyphs on demand, so only the currently-visible
+  line's glyphs are resident (17/34 known chars present, exactly the on-screen
+  line; the best base explained just 2/34 = noise). Tilemap indices carry no
+  pattern either. The ordered font does live in ROM, so decoding the ROM file's
+  2bpp tile blocks could crack the whole charmap at once; otherwise the table
+  grows organically from captured dialog.
+- **...and from ROM it works: the full charmap in one shot.** Decoded every
+  2bpp tile in the ROM file and brute-forced the binarization: all 34 known
+  glyph hashes reappear at `ink = palette index 0`, and every one lines up at a
+  single base tile (22528, offset `0x58000`) — the font *is* stored in ASCII
+  order in ROM. That derives the complete printable-ASCII table (95 glyphs:
+  space, punctuation, digits, `A-Z`, `a-z`) with zero unknowns left.
+  `deadeus_font.json` is now produced deterministically by
+  `exploration/test_rom_font.py`, and the earlier dialog-capture probes become a
+  cross-check rather than the source of truth.
+- **Text eye complete (phase C).** `perception.read_text()` binarizes and hashes
+  each window text tile, looks it up in the font table, and returns the dialog
+  string; `dialog_open()` now gates on the window being enabled *and* on-screen
+  (WY < 144) instead of the earlier, flaky box-tile check. Verified live: it read
+  `I have given you / all this gift of / life` from the intro - and caught a
+  third line that manual capture had missed. The agent now has complete
+  model-free perception: player position + on-screen text + dialog state.
 - **Small, verified steps.** Each capability (load ROM, press buttons, LLM
   decision, vision) was proven in isolation with its own `test_*.py` script
   before being wired into a loop.
