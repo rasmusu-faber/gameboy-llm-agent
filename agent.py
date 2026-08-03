@@ -1,8 +1,11 @@
-"""Navigation loop with a REAL eye: the agent reads its (x, y) position from
-RAM (perception.player_position) and a local LLM chooses moves to reach a target
-tile. Fully local, instant, free. First loop driven by real perception.
+"""Planner/controller agent.
 
-Success metric: Manhattan distance to the target should shrink over the run.
+The LLM decides WHERE to go next (a high-level judgement call); deterministic
+code (navigation.walk_*) does the reliable tile-by-tile moving. This replaces the
+earlier tile-by-tile LLM navigation, which small models handled unreliably - the
+A/B test showed both 3B models mis-stepping and getting stuck (see the README
+design log). The planner is intentionally simple for now (open exploration); it
+is the seam where a real goal + memory will plug in later.
 """
 
 import json
@@ -11,32 +14,21 @@ from pathlib import Path
 import ollama
 from pyboy import PyBoy
 
-from perception import player_position, dialog_open
+from perception import player_position, dialog_open, visible_dialog_text
+from navigation import press, walk_direction
 
 ROM = "roms/Deadeus.gb"
 MODEL = "llama3.2:3b"
-MAX_STEPS = 25
-OUT = Path("runs/nav")
+DIRECTIONS = ["up", "down", "left", "right"]
+ROUNDS = 8
+OUT = Path("runs/explore")
 
-VALID = ["up", "down", "left", "right"]
-
-SYSTEM = (
-    "You navigate a character on a 2D grid by pressing one button at a time. "
-    "Coordinates: x increases to the RIGHT, y increases DOWNWARD. "
-    "Controls: 'right' increases x, 'left' decreases x, 'down' increases y, "
-    "'up' decreases y. Pick EXACTLY ONE of up/down/left/right to move closer to "
-    'the target. Respond ONLY as JSON: {"action": "<up|down|left|right>"}'
+PLAN_SYSTEM = (
+    "You explore a room in a Game Boy game, one move at a time. Each turn you "
+    "choose ONE direction to walk next. You are given your (x, y) position and "
+    "the directions you most recently walked; prefer a direction you did not "
+    'just try. Respond ONLY as JSON: {"direction": "<up|down|left|right>"}'
 )
-
-
-def press(pyboy, button, times=1, hold=6, wait=16):
-    for _ in range(times):
-        pyboy.button_press(button)
-        for _ in range(hold):
-            pyboy.tick()
-        pyboy.button_release(button)
-        for _ in range(wait):
-            pyboy.tick()
 
 
 def _reversible_move(pyboy, fwd, back):
@@ -50,12 +42,11 @@ def _reversible_move(pyboy, fwd, back):
 
 
 def skip_intro(pyboy, max_steps=600):
-    """Autonomously click through the title + intro into the movable game.
+    """Deterministic: click through the title + intro into the movable game.
 
-    Deterministic (no LLM): press A while a dialog is on-screen, and detect
-    arrival with a reversible movement test. Movement tests start only after the
-    title menu, so a direction never nudges a menu cursor. Returns the step it
-    arrived on, or None if it never became movable.
+    Press A while a dialog is on-screen; detect arrival with a reversible
+    movement test. Movement tests start only after the title menu, so a direction
+    never nudges a menu cursor. Returns the step it arrived on, or None.
     """
     press(pyboy, "start")
     streak = 0
@@ -74,34 +65,22 @@ def skip_intro(pyboy, max_steps=600):
     return None
 
 
-def greedy(dx, dy):
-    """Fallback move if the model returns junk: reduce the larger gap."""
-    if abs(dx) >= abs(dy):
-        return "right" if dx > 0 else "left"
-    return "down" if dy > 0 else "up"
-
-
-def choose(x, y, tx, ty):
-    dx, dy = tx - x, ty - y
-    state = (
-        f"You are at (x={x}, y={y}). Target is (x={tx}, y={ty}). "
-        f"dx={dx} (positive = target is to your right), "
-        f"dy={dy} (positive = target is below you). Which single move gets closer?"
-    )
+def plan_direction(pyboy, x, y, recent):
+    """Planner (LLM): choose a direction to explore. Returns a valid direction
+    or None if the model didn't produce one."""
+    state = (f"You are at (x={x}, y={y}). Recently walked: "
+             f"{', '.join(recent) if recent else 'nothing yet'}.")
     resp = ollama.chat(
         model=MODEL,
-        messages=[{"role": "system", "content": SYSTEM},
+        messages=[{"role": "system", "content": PLAN_SYSTEM},
                   {"role": "user", "content": state}],
         format="json",
     )
     try:
-        action = str(json.loads(resp["message"]["content"]).get("action", "")).lower()
+        d = str(json.loads(resp["message"]["content"]).get("direction", "")).lower()
     except (json.JSONDecodeError, AttributeError):
-        action = ""
-    if action not in VALID:
-        action = greedy(dx, dy)
-        return action, True
-    return action, False
+        d = ""
+    return d if d in DIRECTIONS else None
 
 
 def main():
@@ -109,36 +88,33 @@ def main():
     pyboy = PyBoy(ROM, window="null")
     for _ in range(600):
         pyboy.tick()
-    arrived = skip_intro(pyboy)
-    print(f"skip_intro: reached the game at step {arrived}")
+    print(f"skip_intro: reached the game at step {skip_intro(pyboy)}")
 
-    x0, y0 = player_position(pyboy)
-    # Target: 2 tiles right and 2 tiles up, clamped to the room bounds we found
-    tx = min(x0 + 16, 96)
-    ty = max(y0 - 16, 64)
-    pyboy.screen.image.save(OUT / "start.png")
-    print(f"Start (x={x0}, y={y0})  ->  Target (x={tx}, y={ty})")
-    start_dist = abs(tx - x0) + abs(ty - y0)
+    recent = []
+    for r in range(1, ROUNDS + 1):
+        # If a dialog interrupts, read it and advance - deterministic.
+        if dialog_open(pyboy):
+            text = visible_dialog_text(pyboy).replace("\n", " / ")
+            print(f"[{r:02d}] dialog: {text!r} -> A")
+            press(pyboy, "a")
+            continue
 
-    for step in range(1, MAX_STEPS + 1):
         x, y = player_position(pyboy)
-        dist = abs(tx - x) + abs(ty - y)
-        if dist == 0:
-            print(f"[{step:02d}] reached target at (x={x}, y={y})!")
-            break
-        action, fb = choose(x, y, tx, ty)
-        press(pyboy, action)
+        d = plan_direction(pyboy, x, y, recent[-3:])
+        if d is None:                       # planner failed -> pick an untried dir
+            d = next((c for c in DIRECTIONS if c not in recent[-2:]), "up")
+            note = " (fallback)"
+        else:
+            note = ""
+        moved = walk_direction(pyboy, d, max_tiles=12)   # controller: reliable
+        recent.append(d)
         nx, ny = player_position(pyboy)
-        tag = " (fallback)" if fb else ""
-        print(f"[{step:02d}] at ({x:3d},{y:3d}) dist={dist:3d} -> {action:5s}{tag} "
-              f"-> ({nx:3d},{ny:3d})")
+        pyboy.screen.image.save(OUT / f"round_{r:02d}_{d}.png")
+        print(f"[{r:02d}] at ({x:3d},{y:3d}) plan={d:5s}{note} "
+              f"walked {moved:2d} tiles -> ({nx:3d},{ny:3d})")
 
-    x, y = player_position(pyboy)
-    end_dist = abs(tx - x) + abs(ty - y)
-    pyboy.screen.image.save(OUT / "end.png")
     pyboy.stop()
-    print(f"\nDistance: {start_dist} -> {end_dist}  "
-          f"({'reached' if end_dist == 0 else 'closer' if end_dist < start_dist else 'no progress'})")
+    print(f"\nScreenshots in {OUT}/")
 
 
 if __name__ == "__main__":

@@ -229,6 +229,22 @@ That evolution is the point; the log is not rewritten to hide it.
   convention forces a double-negative) plus the missing **stuck-detection**, not
   the model. Takeaway: fix the prompt + add stuck-detection first; model choice
   is secondary. Reverted to `llama3.2:3b` since the swap wasn't justified.
+- **Planner / controller split (deterministic navigation).** The A/B result led
+  to moving *pathing* out of the LLM entirely. `navigation.walk_to()` /
+  `walk_direction()` move the player tile-by-tile (greedy + wall-handling); the
+  LLM only makes the high-level call ("which direction to explore"). `walk_to`
+  reaches the exact target (72,88) that both 3B models got stuck at, and the
+  explore agent now moves reliably every round - it maps the room's bounds and
+  reached a wider strip at the top (x=120, past the earlier room), never
+  freezing. The rule: **deterministic code = execution, LLM = judgement.** This
+  is also the seam where a real goal + memory will plug in.
+- **Confirmed: the agent can leave the room.** A dedicated edge-sweep (push
+  outward along each edge until the scene changes) found the door on the *top*
+  edge and walked through into a visibly different room (position jumped to a new
+  spawn). The reliable room-change signal is the **full 32x32 background tilemap
+  hash** - a per-scene fingerprint, constant while scrolling, flipping on a scene
+  load. Honest correction: the earlier explore run only *reached* the top strip,
+  it had not actually exited - the skepticism was right.
 - **Small, verified steps.** Each capability (load ROM, press buttons, LLM
   decision, vision) was proven in isolation with its own `test_*.py` script
   before being wired into a loop.
