@@ -7,7 +7,7 @@ locate the top-edge door and cross into the next scene.
 import pathlib
 import sys
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 from pyboy import PyBoy  # noqa: E402
 

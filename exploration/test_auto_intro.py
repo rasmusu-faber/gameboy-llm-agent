@@ -13,7 +13,7 @@ Stops as soon as the player is movable = we are in the game.
 import sys
 import pathlib
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 from pyboy import PyBoy  # noqa: E402
 
