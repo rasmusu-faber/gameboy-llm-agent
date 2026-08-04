@@ -28,6 +28,10 @@ PLAYER_Y_ADDR = 0xC008
 PLAYER_X_ADDR = 0xC009
 TILE = 8
 
+# --- scene identity: the full 32x32 background tilemap is a per-scene fingerprint
+# (constant while scrolling inside a room, flips completely on a scene load).
+BG_TILEMAP_SIZE = 32
+
 # --- font table: md5(binarized 8x8 glyph)[:6] -> character ---
 # Derived from the ROM by exploration/test_rom_font.py. Ink = bright pixel, i.e.
 # (grayscale > 128), which is exactly how the table's hashes were built.
@@ -50,6 +54,18 @@ def player_tile(pyboy):
     """Player (x, y) in tile units."""
     x, y = player_position(pyboy)
     return x // TILE, y // TILE
+
+
+def scene_fingerprint(pyboy) -> int:
+    """A stable per-scene id: hash of the full 32x32 background tilemap.
+
+    Stays constant while the player scrolls around within one room and flips
+    completely on a scene load, so comparing it before/after a move detects a
+    room change, and the value itself identifies a scene for map-building.
+    """
+    tm = pyboy.tilemap_background
+    n = BG_TILEMAP_SIZE
+    return hash(tuple(tm[x, y] for y in range(n) for x in range(n)))
 
 
 def window_enabled(pyboy) -> bool:

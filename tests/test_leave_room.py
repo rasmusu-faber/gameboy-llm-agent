@@ -29,18 +29,13 @@ EDGES = [
 ]
 
 
-def full_bg_hash(pyboy):
-    tm = pyboy.tilemap_background
-    return hash(tuple(tm[x, y] for y in range(32) for x in range(32)))
-
-
 def try_edge(pyboy, ref, corner, push_dir, sweep_dir, sweep_len=16, push=4):
     for m in corner:                      # go to the corner of this edge
         walk_direction(pyboy, m, max_tiles=20)
     for _ in range(sweep_len):
         for _ in range(push):             # push outward at this column/row
             press(pyboy, push_dir)
-            if full_bg_hash(pyboy) != ref:
+            if P.scene_fingerprint(pyboy) != ref:
                 return True
         if walk_direction(pyboy, sweep_dir, max_tiles=1) == 0:
             break                         # reached the far corner
@@ -53,7 +48,7 @@ def main():
     for _ in range(600):
         pyboy.tick()
     skip_intro(pyboy)
-    ref = full_bg_hash(pyboy)
+    ref = P.scene_fingerprint(pyboy)
     pyboy.screen.image.save(OUT / "before.png")
     print(f"in room, pos={P.player_position(pyboy)}")
 

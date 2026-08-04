@@ -12,6 +12,9 @@ roms/*
 # Agent run outputs (screenshots, logs, trajectories)
 runs/
 
+# Agent memory notebook — per-savegame runtime state, not part of the repo
+memory/
+
 # Throwaway test screenshots written to the repo root
 test_frame.png
 before.png

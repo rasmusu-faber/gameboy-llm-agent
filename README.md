@@ -21,7 +21,11 @@ LLM. A hands-on learning project about building LLM agents.
    - on-screen text + dialog state from the tilemap (`perception.read_text`) ✅
 4. **Autonomy** — use the dialog/screen-state signal so the agent clears menus
    and dialogue itself, replacing the scripted intro skip. ✅
-5. **Playing** — larger goals: navigate between rooms, progress the game. ⏳
+5. **Playing** — larger goals: navigate between rooms, progress the game. 🔄
+   - deterministic room navigation (planner/controller split) ✅
+   - a goal + real perception in the planner prompt, and a `find_exit` action
+     that leaves an unknown room ✅
+   - a memory notebook (map of scenes + connections; NPC/fact notes next) 🔄
 6. **Part 2 (separate)** — an RL agent on the same task, then an LLM-vs-RL
    comparison.
 
@@ -54,13 +58,20 @@ Download the free, open-source **Deadeus** ROM from the developer's page
 
 ```
 pokemon-llm-agent/
-├── perception.py     # the "eye": player position from RAM + tilemap helpers
-├── agent.py          # navigation agent: reads position, LLM picks moves to a target
-├── tests/            # smoke tests: prove one capability each
-│   ├── test_rom.py       # boot the ROM headless and save a screenshot
-│   ├── test_buttons.py   # button input works (before/after screenshots)
-│   ├── test_llm.py       # local LLM returns a valid JSON action
-│   └── test_vision.py    # a vision model can describe the actual screen
+├── perception.py     # the "eye": position + text from RAM/tilemap; scene fingerprint
+├── navigation.py     # deterministic controller: walk_to / walk_direction / search_for_exit
+├── agent.py          # planner/controller loop: LLM picks an action, code executes it
+├── memory.py         # the notebook: WorldMap (scenes + connections), persisted to world.md
+├── viewer.py         # optional live window (--watch): game screen + perception/decision overlay
+├── tests/            # smoke/capability tests: prove one thing each
+│   ├── test_rom.py         # boot the ROM headless and save a screenshot
+│   ├── test_buttons.py     # button input works (before/after screenshots)
+│   ├── test_llm.py         # local LLM returns a valid JSON action
+│   ├── test_walk_to.py     # deterministic navigation reaches a target tile
+│   ├── test_leave_room.py  # the agent can exit the starting room
+│   ├── test_search_exit.py # search_for_exit finds the door deterministically
+│   ├── test_map_edge.py    # a real room change records a map edge
+│   └── test_memory_map.py  # WorldMap scenes/edges + world.md round-trip (no ROM)
 └── exploration/      # the "workshop": one-off reverse-engineering probes whose
                       #   findings now live in perception.py + the design log
     ├── test_ram_scan.py     # scan work RAM for the player position bytes
@@ -71,6 +82,7 @@ pokemon-llm-agent/
     ├── test_screen_state.py # tilemap-based dialog/screen-state detector
     ├── test_window_dump.py  # dump the window tilemap for comparison
     ├── test_window_pos.py   # read the window position registers (WX/WY)
+    ├── test_rom_font.py     # derive deadeus_font.json from the ROM's font block
     └── agent_vision_loop.py # local vision agent (approach 1, too slow - reference)
 ```
 
@@ -245,6 +257,51 @@ That evolution is the point; the log is not rewritten to hide it.
   hash** - a per-scene fingerprint, constant while scrolling, flipping on a scene
   load. Honest correction: the earlier explore run only *reached* the top strip,
   it had not actually exited - the skepticism was right.
+- **Memory, layer 1: a code-filled map notebook.** The agent's memory is a
+  Markdown notebook it reads and writes as it plays. Writing is split along the
+  architecture principle: **deterministic code writes what it *measures***, the
+  **LLM writes what it *interprets***. The first, code-filled piece is a **map**
+  — the scene fingerprint (promoted into `perception.scene_fingerprint()`) is a
+  node, and a move that flips it is a directed edge. `memory.py`'s `WorldMap`
+  (`seen_scene` / `connect` / `exits_from`) is kept deliberately emulator-free —
+  it takes plain fingerprint ints and positions, so it unit-tests and round-trips
+  without a ROM — and persists as a `## Map` block inside `world.md` between HTML
+  markers so the code can rewrite it idempotently and the notebook accumulates
+  across runs. Verified three ways: a no-ROM unit test (idempotence, dedup,
+  round-trip), a deterministic end-to-end test (a real room change records the
+  edge from live emulator fingerprints), and a full run.
+- **Watching the agent: an optional live viewer.** `viewer.py` (Tkinter +
+  Pillow's `ImageTk`, no new dependency) behind a `--watch` flag opens a window
+  with the upscaled Game Boy screen *plus an overlay of what the agent perceives
+  and decides* — position, current scene, the planner's action, map growth. It
+  refreshes on every button press via a `navigation.FRAME_HOOK`, so motion is
+  smooth; the hook is `None` by default, so headless runs stay fast and
+  unchanged. For a learning project the point is seeing the perception + decision,
+  not just the sprite.
+- **Why it wandered: no goal + a blind planner.** Watching live made the problem
+  obvious. The explore loop had **no goal** (the prompt literally said "choose
+  ONE direction"), and the LLM saw only `(x, y)` + its last few directions — not
+  walls, not the map (which was being *written* but never *read back* into the
+  prompt). So it paced into walls. Fix (step 1): give the planner a **goal**
+  ("find the exit") and **real perception** — which directions are walls, derived
+  from tiles-moved (`0 = wall`, so no extra button-probing that could
+  accidentally step through a door), plus the **known exits** from the map. This
+  made movement directed (it now went straight to an edge) but it still could not
+  find the one-tile door *gap* by itself.
+- **`find_exit`: a high-level action backed by a deterministic sweep.**
+  Systematically sweeping an edge for a door gap is a **reflex**, and a 3B model
+  does it unreliably — it paced the top wall left/right without ever pushing up
+  at the door column. So the planner got a new action, `find_exit`: the **LLM
+  decides *to* search**, and `navigation.search_for_exit()` does the
+  **deterministic edge-sweep** (promoted from `test_leave_room`). Paired with
+  **finer steps** — `walk_direction` capped at a small `STEP_TILES` instead of
+  walking until a wall, which was the real reason the agent always ended up
+  pinned to an edge and never visited the room interior. Result: in a full run
+  the LLM chose `find_exit`, the sweep found the top door, the agent entered the
+  next room, the map recorded `s0 --up--> s1`, and an NPC then spoke in the new
+  room. Honest scope note: the sweep finds **edge** doors; a trigger in the
+  *middle* of a room would be an interaction (press A), a separate later step.
+  The recurring rule holds: **LLM judgement, deterministic reflex.**
 - **Small, verified steps.** Each capability (load ROM, press buttons, LLM
   decision, vision) was proven in isolation with its own `test_*.py` script
   before being wired into a loop.
