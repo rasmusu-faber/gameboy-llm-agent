@@ -7,4 +7,5 @@ dependencies:
   - pip:
       - pyboy
       - pillow
-      - ollama
+      - httpx          # LLM HTTP calls (local Ollama API + OpenAI-compatible cloud)
+      - ollama         # local model server client (still used to pull/run models)

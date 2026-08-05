@@ -6,7 +6,9 @@ A/B test showed small models mis-handle exactly this. The LLM decides *where* to
 go; walk_to() gets there.
 """
 
-from perception import player_position, scene_fingerprint
+from perception import (
+    player_position, scene_fingerprint, visible_dialog_text, dialog_open,
+)
 
 TILE = 8
 
@@ -85,6 +87,115 @@ def search_for_exit(pyboy, ref_fp, sweep_len=16, push=4):
             if walk_direction(pyboy, sweep_dir, max_tiles=1) == 0:
                 break                         # reached the far corner of this edge
     return None
+
+
+def interact(pyboy, direction) -> str:
+    """Face `direction` and press A to examine/talk to the tile there.
+
+    In GB Studio, turning to face a tile + pressing A is how you trigger a sign,
+    object, or NPC. Returns the text that appeared (`perception.visible_dialog_text`)
+    or '' if nothing did - so a plain wall reads as ''. The reflex behind the
+    planner's `interact` intent; the LLM decides *whether* to interact and what to
+    make of the text.
+
+    Caveat: pressing `direction` first turns the player to face the target, but if
+    that tile is open floor the player will *step* onto it. Only interact toward a
+    tile you know is adjacent/blocked (e.g. something you just bumped), so this
+    examines rather than wanders.
+    """
+    press(pyboy, direction)                 # turn to face the target tile
+    press(pyboy, "a")                        # trigger it
+    for _ in range(30):                      # let the box slide in + text render
+        pyboy.tick()
+    return "\n".join(_clean_lines(visible_dialog_text(pyboy)))
+
+
+def _clean_lines(text):
+    """Drop lines that are only unknown glyphs ('?') - a read_text artifact
+    (a border/blank row), so captured text stays clean."""
+    return [ln for ln in text.splitlines() if ln.strip("? ").strip()]
+
+
+def _stable_dialog(pyboy, tries=6) -> str:
+    """Wait for the current dialog page to stop changing (typewriter finished),
+    then return it - so we read complete lines, not mid-render fragments."""
+    prev = ""
+    for _ in range(tries):
+        for _ in range(8):
+            pyboy.tick()
+        cur = visible_dialog_text(pyboy)
+        if cur == prev:
+            break
+        prev = cur
+    return prev
+
+
+def _is_movable(pyboy) -> bool:
+    """True if the player can currently walk (real control, not a cutscene)."""
+    p0 = player_position(pyboy)
+    press(pyboy, "right")
+    if player_position(pyboy) != p0:
+        press(pyboy, "left")                 # restore
+        return True
+    return False
+
+
+def advance_cutscene(pyboy, max_presses=60) -> str:
+    """Play a blocking scripted scene through until the player regains control.
+
+    Deadeus locks the player during scenes (e.g. the mother scene on entering
+    room 2) - including fragments where a character MOVES with no dialog box up -
+    and only A advances them. So we press A until movement works again, collecting
+    any dialogue text along the way (it carries hints). Returns that text; empty
+    if control was never lost (a normal room needs no advancing).
+    """
+    lines, seen = [], set()
+    for _ in range(max_presses):
+        for ln in _clean_lines(visible_dialog_text(pyboy)):
+            ln = ln.strip()
+            if ln and ln not in seen:
+                seen.add(ln)
+                lines.append(ln)
+        if _is_movable(pyboy):               # control returned -> scene is over
+            break
+        press(pyboy, "a")
+    return " ".join(lines)
+
+
+def read_dialog(pyboy, max_pages=20) -> str:
+    """Advance an open dialog to the end, collecting every page's text.
+
+    For passively-triggered dialogue (an NPC speaking on its own): read it all
+    into memory instead of just clicking it away, since hints about places and
+    next steps live in this text. Returns the full text (unique lines, in order).
+    Same blind-A caveat as dismiss_dialog: fine for narration, not choice-aware.
+    """
+    lines, seen = [], set()
+    for _ in range(max_pages):
+        if not dialog_open(pyboy):
+            break
+        for ln in _clean_lines(_stable_dialog(pyboy)):
+            ln = ln.strip()
+            if ln and ln not in seen:
+                seen.add(ln)
+                lines.append(ln)
+        press(pyboy, "a")                    # advance to the next page / close
+    return " ".join(lines)
+
+
+def dismiss_dialog(pyboy, max_presses=10) -> bool:
+    """Close an open dialog by pressing A until it clears. Returns True if closed.
+
+    This blindly advances - safe for plain text boxes and for the bedroom bed
+    prompt (verified: confirming it does not sleep here). KNOWN LIMITATION: a
+    *consequential* yes/no choice elsewhere would need choice-aware handling, not
+    blind A. Revisit when the agent meets decisions with real consequences.
+    """
+    for _ in range(max_presses):
+        if not dialog_open(pyboy):
+            return True
+        press(pyboy, "a")
+    return not dialog_open(pyboy)
 
 
 def walk_to(pyboy, tx, ty, max_steps=80) -> bool:

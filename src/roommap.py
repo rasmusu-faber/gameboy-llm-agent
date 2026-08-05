@@ -9,6 +9,8 @@ This is measured fact (code-filled), one map per scene; kept separate from the
 persistent notebook (memory.py) since it is live per-run local geometry.
 """
 
+from collections import deque
+
 WALL, FLOOR, PLAYER, UNKNOWN = "#", ".", "@", "?"
 _DELTA = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}
 
@@ -42,6 +44,33 @@ class RoomMap:
             out[d] = ("wall" if n in self._walls else
                       "floor" if n in self._floor else "unknown")
         return out
+
+    def nearest_frontier(self, start) -> str | None:
+        """Direction of the first step toward the nearest UNEXPLORED ('?') tile.
+
+        BFS over known floor tiles from `start`; the goal is stepping off floor
+        into an unknown tile (a frontier). Walls are impassable. Returns the
+        cardinal direction to head, or None if nothing unexplored is reachable
+        (e.g. the local area is fully mapped). This is how the door gets crossed:
+        the unexplored tile beyond an edge IS the way out, and the LLM is told
+        exactly which way it lies.
+        """
+        start = tuple(start)
+        seen = {start}
+        q = deque((n, d) for d, (dx, dy) in _DELTA.items()
+                  for n in [(start[0] + dx, start[1] + dy)])
+        while q:
+            tile, first_dir = q.popleft()
+            if tile in self._walls:
+                continue
+            if tile not in self._floor:      # unknown tile reached -> frontier
+                return first_dir
+            if tile in seen:
+                continue
+            seen.add(tile)
+            for dx, dy in _DELTA.values():
+                q.append(((tile[0] + dx, tile[1] + dy), first_dir))
+        return None
 
     def render(self, player, radius: int = 3) -> str:
         """ASCII mini-map centred on the player (up = north)."""

@@ -240,6 +240,76 @@ That evolution is the point; the log is not rewritten to hide it. Dead-ends stay
   log moved out of the README into `docs/design-log.md` so the README can read as
   a story; internal working notes live in `docs/HANDOFF.md` (git-ignored). No
   behaviour change — imports and run commands adjusted accordingly.
+- **Frontier hint: the LLM steps through the door itself.** The mini-map got the
+  3B *to* the exit tile but never *through* it. The fix keeps the LLM as the
+  actor rather than handing the crossing back to deterministic code: (1) reframe
+  the goal as "keep stepping into UNEXPLORED tiles until the room changes" — a
+  door is just unexplored space beyond an edge, not a special thing; (2) compute,
+  deterministically from the RoomMap, the direction to the *nearest* unexplored
+  tile (`RoomMap.nearest_frontier`, a BFS over known floor) and hand it to the
+  planner as one salient line ("Nearest unexplored: up"). The code only says
+  *where* the unknown is; the LLM still chooses and makes the crossing move.
+  Result: same 60-round setup, fresh map — the agent explored the bedroom and
+  then **walked out on its own** into the hallway (`s0 -> s1` recorded), landing
+  in front of an NPC whose lines ("Are you okay? You sounded like you were having
+  a bad dream... A monster?...") were read model-free. Takeaway: **perception +
+  a well-framed goal, not a bigger model, was enough to get the small local LLM
+  through the door.** (`nearest_frontier` also drives the fallback when the model
+  returns nothing.)
+- **Map graph, extended for goal-directed navigation.** `WorldMap` edges now
+  remember the **door tile** they were crossed from, and entering a room records
+  the **reverse edge** (the way back through the spawn tile) - which is why the
+  only known exit is often the entrance. Each node also reserves an optional
+  **label** + **facts** (the interpreted layer, filled later from text/vision/LLM;
+  the stable fingerprint id stays separate from the discovered name - clean
+  grounding for "go to the church"). All of it round-trips in `world.md`. This is
+  the foundation the `go_to`/intent layer (see action-vocabulary.md) will sit on.
+- **Interaction: `interact()` + a landmark store.** `navigation.interact(dir)`
+  faces a tile, presses A, and reads the text model-free (the same `read_text`
+  path as dialogue). `memory` gains a per-scene **landmark** list (an interactable
+  at a tile + its text, keyed by tile). Verified against a real object: the
+  bedroom bed reads "Time for bed?..".
+- **Auto-detect on bump - and a safety finding.** A blocked move (0 tiles) might
+  be an object, not a wall, so the loop now interacts once per bumped tile and
+  records any text as a landmark. Live proof: while exploring upward the agent hit
+  the top wall and auto-discovered the **bookshelves** ("So many books") as
+  landmarks `l0`/`l1`, saved to `world.md` - the environment reading itself into
+  memory without a vision model. **Safety:** the bed prompt turned out to be a
+  yes/no *choice* (B does not cancel it; A walks into a Yes/No menu). Probed all
+  options - none slept (the game blocks sleeping right after waking), so blindly
+  advancing it with `dismiss_dialog()` is safe *here*. **Known limitation, logged
+  in code:** a consequential choice elsewhere would need choice-aware handling,
+  not blind A. Interaction reads the world; it must not blindly *commit* to
+  irreversible decisions.
+- **The intent layer: LLM orchestrator over deterministic skills.** Replaced the
+  per-tile planner entirely. The LLM now picks ONE high-level **intent** per turn
+  - `explore`, `go_to <id>`, `interact <id>`, `remember <note>` - and a
+  deterministic **skill** runs it to completion (explore = frontier + auto-detect
+  + door-crossing; go_to = walk_to a landmark or cross a known edge; interact =
+  walk up + read; remember = write a fact). The state is intent-level (room +
+  label, known exits, landmarks here, explored?, goal, recent results), not raw
+  `(x, y)`. One LLM call per intent, ~15 a run instead of 60 tile-steps. Result:
+  the 3B sensibly chose `explore` while the room was unmapped, **crossed into the
+  hallway on its own**, and `interact`ed with the NPC and objects - building a
+  genuine notebook: two rooms connected both ways (with door tiles) and ~18
+  landmarks of real content ("It was just a dream", "flowers when you check in on
+  her…"). The `why` fields show actual reasoning ("room is not fully explored",
+  "Read the message to understand"). This is where the LLM stops being
+  decorative: **judgement over a learned world, reflexes in code** - the tool-use
+  / orchestrator pattern. Honest open items: cross-room `go_to` routing isn't
+  built yet (handled with a clear message, not a crash); reverse-edge crossing
+  (`go_to s0`) doesn't reliably step back through yet; landmark capture is noisy
+  (a multi-tile bookshelf becomes 8 "So many books" landmarks; the typewriter
+  effect truncates some text, e.g. "You know, I t…").
+- **Swappable LLM backend (local ↔ cloud).** Local `llama3.2:3b` on this CPU
+  takes ~1-2 min per call, which is painful for iteration. `src/llm.py` mirrors
+  the relocation-assistant-rag `generator.py` pattern: one `chat_json()`, a
+  `LLM_BACKEND` switch (`ollama` | `openai`), and an OpenAI-compatible `base_url`
+  so it points at ANY host. Set `OPENAI_*` in a git-ignored `.env` to run the
+  **same** `llama3.2:3b` on fast cloud hardware (Together / OpenRouter / DeepInfra
+  → sub-second, prompt behaviour carries over), or a stronger model for real
+  runs. Key never in code. Verified the local path still works via the Ollama
+  HTTP API (httpx). Speed *and* the planned quality upgrade, one switch.
 - **Small, verified steps.** Each capability (load ROM, press buttons, LLM
   decision, vision) was proven in isolation with its own `test_*.py` script
   before being wired into a loop.

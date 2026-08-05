@@ -30,6 +30,17 @@ def main():
     rm.observe((8, 13), (8, 12), "up", moved=1)   # now we DID move up
     assert rm.adjacent((8, 13))["up"] == "floor"
 
+    # Frontier: from (8,13) up/left are floor, down/right are unexplored -> the
+    # nearest unknown is one step down (BFS, up preferred but up is now floor).
+    assert rm.nearest_frontier((8, 13)) == "down", rm.nearest_frontier((8, 13))
+    # Fully-known 1-tile pocket has no frontier.
+    solo = RoomMap()
+    for t in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)]:
+        solo.mark_floor(t)
+    for w in [(2, 0), (-2, 0), (0, 2), (0, -2), (1, 1), (1, -1), (-1, 1), (-1, -1)]:
+        solo._walls.add(w)
+    assert solo.nearest_frontier((0, 0)) is None
+
     print("PASS")
 
 
