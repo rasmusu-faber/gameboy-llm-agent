@@ -33,13 +33,17 @@ def main():
     # Frontier: from (8,13) up/left are floor, down/right are unexplored -> the
     # nearest unknown is one step down (BFS, up preferred but up is now floor).
     assert rm.nearest_frontier((8, 13)) == "down", rm.nearest_frontier((8, 13))
-    # Fully-known 1-tile pocket has no frontier.
+    # rm still borders unknown tiles -> not fully explored.
+    assert rm.has_unexplored()
+
+    # Fully-known 1-tile pocket has no frontier and counts as fully explored.
     solo = RoomMap()
     for t in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)]:
         solo.mark_floor(t)
     for w in [(2, 0), (-2, 0), (0, 2), (0, -2), (1, 1), (1, -1), (-1, 1), (-1, -1)]:
         solo._walls.add(w)
     assert solo.nearest_frontier((0, 0)) is None
+    assert not solo.has_unexplored()
 
     print("PASS")
 

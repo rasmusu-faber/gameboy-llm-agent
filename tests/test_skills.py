@@ -41,29 +41,36 @@ def test_go_to_and_interact():
     pb.stop()
 
 
-def test_explore_finds_and_leaves():
+def test_explore_maps_room_fully():
+    """Explore fully maps the current room and does NOT leave it (crossing is a
+    deliberate go_to). It still DISCOVERS the exit - registering the neighbour room
+    and returning - so scene_count grows while the agent stays put."""
     pb = _booted()
     world = WorldMap()
     fp = P.scene_fingerprint(pb)
+    start = fp
     world.seen_scene(fp, P.player_position(pb))
     rooms, probed = {}, {}
 
-    left = False
-    for _ in range(5):
+    fully = False
+    for _ in range(15):
         res, fp = skill_explore(pb, world, rooms, probed, fp)
         print("explore:", res)
-        if "new room" in res:
-            left = True
+        assert fp == start, "explore must stay in the current room"
+        if "fully mapped" in res:
+            fully = True
             break
 
     assert world.landmark_count >= 1, "explore should auto-detect at least one object"
-    assert left and world.scene_count == 2, "explore should leave the bedroom"
-    pb.stop()
+    assert fully, "explore should fully map the bedroom"
+    assert world.scene_count == 2, "explore should discover (register) the neighbour room"
+    assert world.scene_id(P.scene_fingerprint(pb)) == "s0", "agent should still be in s0"
+    pb.stop(save=False)
 
 
 def main():
     test_go_to_and_interact()
-    test_explore_finds_and_leaves()
+    test_explore_maps_room_fully()
     print("PASS")
 
 

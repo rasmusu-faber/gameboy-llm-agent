@@ -32,6 +32,19 @@ TILE = 8
 # (constant while scrolling inside a room, flips completely on a scene load).
 BG_TILEMAP_SIZE = 32
 
+# --- in-game day counter -------------------------------------------------------
+# The day lives at 0xC60F: 1 on day 1, 2 on day 2, 3 on day 3 (matches the intro's
+# "three days"). Found by a differential + monotonic RAM scan across sleeps: it is
+# the ONLY byte that increments by exactly +1 each night AND reads the same in
+# every scene of a given day. Verified against loaded day-2/day-3 savestates:
+# constant across scenes, correct value each day.
+#   Rejected earlier: 0xC4A7 (also found by RAM-diffing sleeps) is NOT the day - it
+#   fluctuates per scene (6,7,2,3,1... / 3,1,0,0...), never monotonically per night.
+#   Kept as a marker so nobody re-tries it. The scene-independence test is what
+#   distinguishes the two.
+DAY_ADDR = 0xC60F
+_DAY_JITTER_NOT_DAY = 0xC4A7  # do not use: per-scene noise, disproven day byte
+
 # --- font table: md5(binarized 8x8 glyph)[:6] -> character ---
 # Derived from the ROM by exploration/test_rom_font.py. Ink = bright pixel, i.e.
 # (grayscale > 128), which is exactly how the table's hashes were built.
@@ -54,6 +67,17 @@ def player_tile(pyboy):
     """Player (x, y) in tile units."""
     x, y = player_position(pyboy)
     return x // TILE, y // TILE
+
+
+def game_day(pyboy) -> int:
+    """The current in-game day (1, 2 or 3). Model-free from RAM (see DAY_ADDR).
+
+    Deadeus gives the player three days; a night passes by sleeping. This is the
+    hook day-awareness needs so the agent can weigh 'how much time is left' instead
+    of sleeping blindly to the credits."""
+    return pyboy.memory[DAY_ADDR]
+
+
 
 
 def scene_fingerprint(pyboy) -> int:

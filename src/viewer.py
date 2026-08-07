@@ -10,6 +10,7 @@ The image refreshes on every button press via navigation.FRAME_HOOK (smooth
 motion); the overlay facts are pushed by the agent loop once per decision.
 """
 
+import time
 import tkinter as tk
 
 from PIL import ImageTk
@@ -52,6 +53,19 @@ class Viewer:
         text = "\n".join(f"{k:>7}: {v}" for k, v in self._overlay.items())
         self._info.configure(text=text)
         self.root.update_idletasks()
+
+    def sleep(self, seconds: float) -> None:
+        """Sleep while keeping the window responsive. A plain time.sleep on the
+        main thread would freeze Tk and Windows paints the frozen window WHITE - so
+        during any wait (the 429 backoff, or --delay pacing) pump the event loop in
+        small slices instead of blocking."""
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            try:
+                self.root.update()
+            except tk.TclError:
+                return
+            time.sleep(0.03)
 
     def wait_close(self) -> None:
         """Keep the window open until the user closes it (call at run end)."""

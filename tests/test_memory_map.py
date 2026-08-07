@@ -56,9 +56,15 @@ def main():
                                       "text": "It was just a bad dream"}
     assert wm.find_landmark("l9") is None
 
+    # World knowledge (the intro premise): global, deduped, round-tripped.
+    wm.add_knowledge("You have three days. Harm no one.")
+    wm.add_knowledge("You have three days. Harm no one.")   # dedup
+    assert wm.knowledge() == ["You have three days. Harm no one."]
+
     wm.save(out)
     text = out.read_text(encoding="utf-8")
     print(text)
+    assert "knowledge: You have three days" in text
     assert "s0 --up--> s1  door=(14, 8)" in text
     assert 'label="bedroom"' in text and "fact: a book lies on the table" in text
     assert "landmark: l0 @ (10, 6): It was just a bad dream" in text
@@ -70,6 +76,7 @@ def main():
     assert wm2._edges == wm._edges, (wm2._edges, wm._edges)
     assert wm2.door_tile(HALLWAY, "down", BEDROOM) == (14, 7)
     assert wm2.label_of(BEDROOM) == "bedroom"
+    assert wm2.knowledge() == wm.knowledge()
     assert wm2.find_landmark("l0")["tile"] == (10, 6)
     # Counter restored: the next landmark after reload is l1, not l0 again.
     assert wm2.add_landmark(HALLWAY, (1, 1), "note") == "l1"

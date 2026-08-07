@@ -313,3 +313,79 @@ That evolution is the point; the log is not rewritten to hide it. Dead-ends stay
 - **Small, verified steps.** Each capability (load ROM, press buttons, LLM
   decision, vision) was proven in isolation with its own `test_*.py` script
   before being wired into a loop.
+- **Reverse-crossing fixed (the real root cause was a wrong assumption, not the
+  mother scene).** Open issue #1 was "`go_to s0` back through a known edge usually
+  logs 'didn't cross'". Isolating it on the *mother-free* bedroom<->hall door
+  (deterministic, no LLM) disproved the working theory that the room-2 mother
+  cutscene was to blame: the reverse crossing failed there too. Measurement — enter
+  the hall via `up`, spawning at tile (14,7); the real way back is *also* `up` at
+  (13,7), **not** `down` from the spawn. So `note_crossing`'s guessed reverse edge
+  (spawn tile + geometric opposite direction) is simply wrong in Deadeus, and
+  `skill_go_to` was pressing the wrong direction on the wrong tile. Fix, in the
+  spirit of "deterministic reflex, learned from real crossings, not guessed":
+  `navigation.sweep_for_crossing` (the edge-sweep, now also returning the tile it
+  crossed from; `search_for_exit` became a thin wrapper), a fallback in
+  `skill_go_to` (`_cross_by_sweep`) that sweeps when the recorded edge fails,
+  records the REAL edge from the crossing, and prunes the stale guess
+  (`WorldMap.forget_edge`). Verified end-to-end (`tests/test_reverse_crossing.py`):
+  the agent returns to s0 twice and the map keeps only the true `up` edge. Honest
+  limitation: the fast door-tile re-cross still often doesn't fire (a door quirk),
+  so returns currently go through the sweep each time — correct but not cheap; a
+  cheaper direct re-cross is a later refinement. The room-2 mother scene (two
+  dialogs before you can leave) is a separate, still-untested concern.
+- **The real day byte, found the disciplined way: `0xC60F`.** Day-awareness was
+  blocked because an earlier RAM-diff-across-sleeps had picked `0xC4A7`, later
+  disproven (it jitters per scene: 6,7,2,3,1…, not per night). The lesson baked
+  into this pass: a day counter is *scene-independent* - the earlier method diffed
+  too few, uncontrolled states and mistook per-scene noise for the day. New method,
+  one experiment script (no rabbit-holing): snapshot the SAME scene+position
+  (bedroom spawn) across day 1/2/3 - so per-scene differences cancel - and keep the
+  byte that increments by exactly +1 each night AND reads identically in a second
+  scene (the day-1 hallway). Reaching day 2/3 was possible now that reverse-crossing
+  works (hall round-trip, then confirm 'Yes' at the bed). Exactly one byte survived:
+  `0xC60F` = 1/2/3 on day 1/2/3. Confirmed the way 0xC4A7 was *debunked* - load the
+  day-2/3 savestates, tour several scenes: 0xC60F holds constant while 0xC4A7
+  jitters. Wired as `perception.game_day`; guarded by `tests/test_game_day.py`
+  (fast: day 1 reads 1 in both bedroom and hallway); day-1/2/3 savestates kept in
+  `runs/day_states/` so day-awareness work needn't sleep each time. (Housekeeping:
+  the day-byte run slept and the older ROM tests stop() with save=True, so the
+  git-ignored battery save may have been rewritten; new tests use save=False.)
+- **Bed sleep-decline verified against the real day byte (issue #2 closed).** The
+  auto-decline logic (never confirm a Yes/No, e.g. the bed's "Time for bed?") had
+  been written but never provably tested - day-1 blocks the bed, so a "didn't
+  sleep" result there is meaningless. Now that 0xC60F gives the day and reverse-
+  crossing lets us reach an enabled bed, the test runs on day 2: a positive control
+  confirms 'Yes' advances day 2 -> 3 (so the bed here genuinely sleeps), while both
+  auto paths - `read_dialog` (skill_interact) and `dismiss_dialog` (the explore
+  bump) - leave the day at 2 and close the dialog. Captured as a self-contained
+  `tests/test_bed_decline.py`: it reaches day 2, snapshots state to an in-memory
+  buffer, and reloads it between the three trials (no on-disk savestate). Honest
+  caveat: deterministic from one snapshot, so it proves the decline *path*, not
+  every frame-alignment the slowly-loading menu might present in live play.
+- **Day-awareness wired into the prompt.** Now that 0xC60F gives a reliable day,
+  `build_state` surfaces a "Time: day N of 3 - K day(s) left ... sleeping in a bed
+  ends the current day" line, and the system prompt adds one neutral sentence
+  asking the LLM to weigh its limited time toward the goal. Deliberately NOT an
+  anti-sleep rule: the point is to observe whether the model self-regulates against
+  the clock (it previously fixated on the bed and could sleep straight to the
+  credits with nothing left). `tests/test_game_day.py` extended to assert the day
+  shows up in `build_state`. Next: run the agent over Groq and watch how the
+  visible day changes its behaviour around the bed.
+- **Explore now fully maps a room before ever leaving it (bouncing fixed, bed found
+  honestly).** The user vetoed seeding the bed as a landmark ("feels like cheating")
+  and proposed the right model: fully explore room 1, then room 2 - where "fully"
+  means visit every reachable tile and, on each blocked bump, probe once to tell
+  wall from object. The bouncing (issue #4) came from `explore` auto-crossing the
+  first door it met (`nearest_frontier` treats a doorway as just another unexplored
+  tile). Rewrite: a discovered door is recorded, its doorway fenced off
+  (`RoomMap.mark_wall`), and the agent returns via the (now robust) `skill_go_to`
+  to finish the room; known doorways are re-fenced at each explore call; crossing is
+  a deliberate `go_to`, not a side effect. One real bug surfaced en route: bumping
+  the bedroom's SAVE POINT opens "Save Game? / Cancel", which `dismiss_dialog`
+  (Yes/No-only) confirmed - leaving a "Game saved!" box that wedged all movement.
+  Fixed by draining any open dialog at the top of each explore step (the accidental
+  save itself is logged as a minor follow-up, same class as the bed decline).
+  Result, verified deterministically (no LLM, `tests/test_explore_full_room.py`):
+  the bedroom is mapped fully, the agent stays in s0, and the **bed is discovered by
+  bumping** as l12 @ (6,14) "Time for bed?..." - no seeding. `test_skills` updated
+  from the old "explore should leave" contract to "maps fully, stays put".

@@ -24,6 +24,15 @@ class RoomMap:
         self._floor.add(tuple(tile))
         self._walls.discard(tuple(tile))
 
+    def mark_wall(self, tile: tuple[int, int]) -> None:
+        """Force a tile to count as an impassable boundary for exploration - used
+        to fence off a known doorway so `nearest_frontier` stops routing back out
+        of the room (crossing is a deliberate go_to, not a side effect of explore).
+        Never overrides a tile already known to be floor."""
+        tile = tuple(tile)
+        if tile not in self._floor:
+            self._walls.add(tile)
+
     def observe(self, from_tile, to_tile, direction: str, moved: int) -> None:
         """Record one move's outcome. moved == 0 => the neighbour in `direction`
         is a wall; moved > 0 => the tile we landed on is floor."""
@@ -71,6 +80,17 @@ class RoomMap:
             for dx, dy in _DELTA.values():
                 q.append(((tile[0] + dx, tile[1] + dy), first_dir))
         return None
+
+    def has_unexplored(self) -> bool:
+        """True if any known floor tile still borders an unexplored ('?') tile -
+        i.e. the room is not fully mapped. Needs no start point, so it works for
+        rooms the player isn't currently standing in (for the house overview)."""
+        for tile in self._floor:
+            for dx, dy in _DELTA.values():
+                n = (tile[0] + dx, tile[1] + dy)
+                if n not in self._floor and n not in self._walls:
+                    return True
+        return False
 
     def render(self, player, radius: int = 3) -> str:
         """ASCII mini-map centred on the player (up = north)."""

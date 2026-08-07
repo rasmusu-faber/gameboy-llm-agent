@@ -35,6 +35,7 @@ MAP_END = "<!-- MAP:END -->"
 
 OPPOSITE = {"up": "down", "down": "up", "left": "right", "right": "left"}
 
+_KNOWLEDGE_RE = re.compile(r"- knowledge: (.*)$")
 _SCENE_RE = re.compile(
     r"- (s\d+)\s+fp=([0-9a-f]+)\s+pos=\((\d+),\s*(\d+)\)(?:\s+label=\"([^\"]*)\")?")
 _FACT_RE = re.compile(r"^\s+fact: (.*)$")
@@ -62,6 +63,7 @@ class WorldMap:
         self._scenes: dict[str, dict] = {}
         # (from_key, direction, to_key) -> door tile (x, y) | None
         self._edges: dict[tuple[str, str, str], tuple | None] = {}
+        self._knowledge: list[str] = []     # global world knowledge (e.g. the intro premise)
         self._next_landmark = 0             # global l0, l1, … id counter
 
     def seen_scene(self, fp: int, pos: tuple[int, int]) -> str:
@@ -84,8 +86,24 @@ class WorldMap:
     def landmark_count(self) -> int:
         return sum(len(s["landmarks"]) for s in self._scenes.values())
 
+    def add_knowledge(self, text: str) -> None:
+        """Store a piece of persistent world knowledge (e.g. the intro premise:
+        'you have three days'). Global, not tied to a scene. Deduped."""
+        text = " ".join(str(text).split())
+        if text and text not in self._knowledge:
+            self._knowledge.append(text)
+
+    def knowledge(self) -> list[str]:
+        return list(self._knowledge)
+
     def scene_id(self, fp: int) -> str:
         return self._scenes[fp_key(fp)]["id"]
+
+    def scene_list(self) -> list[dict]:
+        """All known scenes for the house overview: id, label, key, #landmarks."""
+        return [{"id": s["id"], "label": s["label"], "key": k,
+                 "landmarks": len(s["landmarks"])}
+                for k, s in self._scenes.items()]
 
     def exits_from(self, fp: int) -> list[tuple[str, str]]:
         """Known exits out of scene `fp`: list of (direction, target scene id).
@@ -120,6 +138,11 @@ class WorldMap:
         key = (fk, direction, tk)
         door = tuple(door_tile) if door_tile is not None else self._edges.get(key)
         self._edges[key] = door
+
+    def forget_edge(self, from_fp: int, direction: str, to_fp: int) -> None:
+        """Drop a directed edge. Used to prune a guessed reverse edge once the
+        real one has been learned from an actual crossing (see agent._cross_by_sweep)."""
+        self._edges.pop((fp_key(from_fp), direction, fp_key(to_fp)), None)
 
     def note_crossing(self, from_fp: int, direction: str, to_fp: int,
                       door_tile=None, spawn_tile=None) -> None:
@@ -200,6 +223,10 @@ class WorldMap:
     def render_block(self) -> str:
         """The Map section body (between the markers), deterministically ordered."""
         lines = []
+        for k in self._knowledge:
+            lines.append(f"- knowledge: {k}")
+        if self._knowledge and self._scenes:
+            lines.append("")
         for key, s in self._scenes.items():
             x, y = s["pos"]
             label = f'  label="{s["label"]}"' if s["label"] else ""
@@ -258,6 +285,10 @@ class WorldMap:
         current_key = None
         max_landmark = -1
         for line in m.group(1).splitlines():
+            know = _KNOWLEDGE_RE.match(line.strip())
+            if know:
+                wm._knowledge.append(know.group(1))
+                continue
             fact = _FACT_RE.match(line)
             if fact and current_key:
                 wm._scenes[current_key]["facts"].append(fact.group(1))

@@ -16,6 +16,7 @@ sub-second responses while testing, or at a stronger model for real runs.
 
 import json
 import os
+import time
 from pathlib import Path
 
 import httpx
@@ -48,16 +49,60 @@ def model_name() -> str:
     return OPENAI_MODEL if BACKEND == "openai" else OLLAMA_MODEL
 
 
+MAX_RETRIES = 4                # attempts on a 429 before giving up to the fallback
+RETRY_CAP = 20.0               # never wait longer than this on one backoff
+
+# Optional viewer-friendly sleep: the agent sets this to viewer.sleep so backoff
+# waits pump the Tk event loop instead of freezing the window (white on Windows).
+# Default None -> a plain blocking time.sleep (correct for headless runs).
+WAIT_HOOK = None
+
+
+def _wait(seconds: float) -> None:
+    (WAIT_HOOK or time.sleep)(seconds)
+
+
+def _retry_after(resp, fallback: float) -> float:
+    """Seconds to wait per the server's Retry-After header (Groq sends one on a
+    429), capped; fall back to a caller-supplied backoff if it's missing/unparsable."""
+    raw = resp.headers.get("retry-after") or resp.headers.get("Retry-After")
+    try:
+        return min(float(raw), RETRY_CAP) if raw is not None else min(fallback, RETRY_CAP)
+    except (TypeError, ValueError):
+        return min(fallback, RETRY_CAP)
+
+
 def chat_json(system: str, user: str, timeout: float = 120.0) -> dict:
     """Send a system+user prompt, expect a JSON object, return it parsed.
 
     Returns {} if the model didn't produce valid JSON, so callers can validate
-    without try/except at every site.
+    without try/except at every site. On a 429 (rate limit) it retries with a
+    Retry-After-honoring backoff - which both keeps the LLM in the loop and
+    naturally paces rapid runs under the provider's per-minute cap - only degrading
+    to {} (the explore fallback) once retries are exhausted.
     """
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user}]
-    content = (_openai(messages, timeout) if BACKEND == "openai"
-               else _ollama(messages, timeout))
+    content = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            content = (_openai(messages, timeout) if BACKEND == "openai"
+                       else _ollama(messages, timeout))
+            break
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 429 and attempt < MAX_RETRIES - 1:
+                wait = _retry_after(e.response, fallback=2.0 * (attempt + 1))
+                print(f"  [llm] 429 rate-limited; retry {attempt + 1}/{MAX_RETRIES - 1} "
+                      f"in {wait:.1f}s")
+                _wait(wait)
+                continue
+            print(f"  [llm] request failed: {type(e).__name__}: {str(e)[:80]}")
+            return {}
+        except Exception as e:                   # network / timeout / etc.
+            print(f"  [llm] request failed: {type(e).__name__}: {str(e)[:80]}")
+            return {}
+    if content is None:
+        return {}
     try:
         return json.loads(content)
     except (json.JSONDecodeError, TypeError):

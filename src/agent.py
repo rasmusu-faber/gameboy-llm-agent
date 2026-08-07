@@ -8,19 +8,21 @@ calls, code does the reflexes. See docs/action-vocabulary.md.
 """
 
 import argparse
+import time
 from pathlib import Path
 
 from pyboy import PyBoy
 
 from perception import (
-    player_position, player_tile, dialog_open, scene_fingerprint,
+    player_position, player_tile, dialog_open, visible_dialog_text,
+    scene_fingerprint, game_day,
 )
 import navigation
 from navigation import (
     press, walk_direction, walk_to, interact, dismiss_dialog, read_dialog,
-    advance_cutscene, TILE,
+    advance_cutscene, sweep_for_crossing, TILE,
 )
-from memory import WorldMap
+from memory import WorldMap, fp_key
 from roommap import RoomMap
 import llm
 
@@ -30,9 +32,10 @@ ROM = "roms/Deadeus.gb"
 INTENT_ROUNDS = 15                      # one LLM judgement call per round
 EXPLORE_BUDGET = 25                     # max tiles a single explore intent walks
 SKILLS = ("explore", "go_to", "interact", "remember")
-GOAL = ("Explore as MUCH of the house as possible: fully map every room, read "
-        "every object and person you find, and once a room is fully explored move "
-        "on through a known exit to discover NEW rooms. Maximise what you uncover.")
+GOAL = ("You are the boy from the intro. You have THREE DAYS before the entity "
+        "returns to destroy everyone unless the debt is repaid. Find out what is "
+        "happening and how to prevent it WITHOUT harming anyone, and check on the "
+        "people who matter to you. Explore, read, talk, and act on what you learn.")
 OUT = Path("runs/explore")
 WORLD = Path("memory/world.md")   # persistent notebook (git-ignored)
 
@@ -46,13 +49,22 @@ INTENT_SYSTEM = (
     "(s0, s1, …). Use to revisit an object or to leave through a known exit.\n"
     "- interact <id> : examine or talk to a known landmark (read its text).\n"
     "- remember <note> : write down a short conclusion worth keeping.\n"
-    "Decide from the state you are given (known exits, landmarks, whether the "
-    "room is fully explored, your goal). Prefer explore while the room is not "
-    "fully mapped; interact with landmarks you have not read. IMPORTANT: if the "
-    "room is ALREADY fully explored, do NOT keep choosing explore (it does "
-    "nothing) - go_to a connected room to explore somewhere new.\n"
+    "You are given a 'House so far' overview of every known room and whether it "
+    "is fully explored. Use it to keep DISCOVERING new ground:\n"
+    "- explore while the CURRENT room still has unexplored area;\n"
+    "- interact with landmarks you have not read yet;\n"
+    "- if the current room is fully explored, DON'T explore again (it does "
+    "nothing) - go_to a room that is only PARTIALLY explored or NOT visited yet "
+    "(use a known exit; prefer a connected one);\n"
+    "- always act in service of your GOAL, not just to wander.\n"
+    "You are told the current day and how many days remain; you have limited time, "
+    "so weigh how you spend it toward the goal.\n"
+    "Keep a running plan toward the goal in 'subgoal' and update it as you learn "
+    "(e.g. 'find and talk to my family', 'find out how to repay the debt'). "
+    "Use 'note' with the remember action to write down anything important.\n"
     'Respond ONLY as JSON: {"action":"explore|go_to|interact|remember",'
-    '"target":"<id or empty>","note":"<for remember>","why":"<short reason>"}'
+    '"target":"<id or empty>","note":"<for remember>",'
+    '"subgoal":"<your current plan>","why":"<short reason>"}'
 )
 
 
@@ -66,17 +78,33 @@ def _reversible_move(pyboy, fwd, back):
     return p1 != p0 and player_position(pyboy) == p0
 
 
-def skip_intro(pyboy, max_steps=600):
-    """Deterministic: click through the title + intro into the movable game.
+def _dedup_fragments(lines):
+    """Join lines, dropping typewriter prefixes (a line fully contained at the
+    start of a longer captured line, e.g. 'I have given yo' vs '...you')."""
+    keep = [ln for ln in lines
+            if not any(o != ln and o.startswith(ln) for o in lines)]
+    return " ".join(keep)
 
-    Press A while a dialog is on-screen; detect arrival with a reversible
-    movement test. Movement tests start only after the title menu, so a direction
-    never nudges a menu cursor. Returns the step it arrived on, or None.
+
+def skip_intro(pyboy, max_steps=600):
+    """Deterministic: click through the title + intro into the movable game,
+    CAPTURING the intro text on the way (it holds the premise - 'Three Days', the
+    mother's warning). Returns that captured text.
+
+    Press A while a dialog is on-screen; detect arrival with a reversible movement
+    test. Movement tests start only after the title menu, so a direction never
+    nudges a menu cursor.
     """
     press(pyboy, "start")
     streak = 0
+    lines, seen = [], set()
     for step in range(1, max_steps + 1):
         if dialog_open(pyboy):
+            for ln in visible_dialog_text(pyboy).splitlines():
+                ln = ln.strip()
+                if ln.strip("? ").strip() and ln not in seen:
+                    seen.add(ln)
+                    lines.append(ln)
             streak = 0
             press(pyboy, "a")
         else:
@@ -85,9 +113,9 @@ def skip_intro(pyboy, max_steps=600):
                 _reversible_move(pyboy, "right", "left")
                 or _reversible_move(pyboy, "down", "up")
             ):
-                return step
+                break
             press(pyboy, "a")
-    return None
+    return _dedup_fragments(lines)
 
 
 # --- deterministic skills (the reflex library the LLM orchestrates) ----------
@@ -110,33 +138,52 @@ def _auto_detect(pyboy, world, rooms, probed, cur_fp, direction, ptile):
 
 
 def skill_explore(pyboy, world, rooms, probed, cur_fp):
-    """Walk toward the nearest unexplored tile until a new room is entered, an
-    area is fully mapped, or the budget runs out. Objects bumped along the way
-    are auto-detected as landmarks. Returns (summary, current_fp)."""
+    """FULLY map the current room before ever leaving it. Walk to the nearest
+    unexplored tile, probing bumped objects into landmarks, until every reachable
+    tile is covered. Doors are NOT walked through: a discovered exit is recorded,
+    its doorway is fenced off, and the agent returns to finish the room. Changing
+    rooms is a deliberate `go_to`, not a side effect of exploring. This is what
+    makes the agent map room 1 fully (and so find e.g. the bed) instead of bouncing
+    out the first door it meets. Returns (summary, current_fp)."""
     room = rooms.setdefault(cur_fp, RoomMap())
+    for d, _tid, door in world.exits_detailed(cur_fp):   # fence off known doorways
+        if door:
+            dx, dy = _DELTA[d]
+            room.mark_wall((door[0] + dx, door[1] + dy))
     found = []
     for _ in range(EXPLORE_BUDGET):
+        if dialog_open(pyboy):            # a probe may have opened one (e.g. a save
+            dismiss_dialog(pyboy)         # point) - drain it so moves aren't wedged
         ptile = player_tile(pyboy)
         room.mark_floor(ptile)
         frontier = room.nearest_frontier(ptile)
         if frontier is None:
             return f"explored; room fully mapped{_join(found)}", cur_fp
         moved = walk_direction(pyboy, frontier, max_tiles=1)
-        room.observe(ptile, player_tile(pyboy), frontier, moved)
-        if moved == 0:
-            note = _auto_detect(pyboy, world, rooms, probed, cur_fp, frontier, ptile)
-            if note:
-                found.append(note)
-        if scene_fingerprint(pyboy) != cur_fp:
-            heard = advance_cutscene(pyboy)   # play any entry scene until movable
-            new_fp = scene_fingerprint(pyboy)  # read the SETTLED room now
+
+        if scene_fingerprint(pyboy) != cur_fp:            # bumped a door and crossed
+            heard = advance_cutscene(pyboy)               # play any entry scene
+            new_fp = scene_fingerprint(pyboy)
             nid = world.seen_scene(new_fp, player_position(pyboy))
             world.note_crossing(cur_fp, frontier, new_fp,
                                 door_tile=ptile, spawn_tile=player_tile(pyboy))
             if heard:
-                world.add_fact(new_fp, heard)  # the entry dialogue -> hints
-            note = f" (scene: {heard[:24]!r})" if heard else ""
-            return f"explored; entered a new room ({nid}){_join(found)}{note}", new_fp
+                world.add_fact(new_fp, heard)             # entry dialogue -> hints
+            dx, dy = _DELTA[frontier]
+            room.mark_wall((ptile[0] + dx, ptile[1] + dy))  # fence this doorway
+            _, back_fp = skill_go_to(pyboy, world, new_fp, world.scene_id(cur_fp))
+            if back_fp != cur_fp:                         # couldn't return -> accept it
+                note = f" (scene: {heard[:24]!r})" if heard else ""
+                return (f"explored; found exit to {nid} but stayed there"
+                        f"{_join(found)}{note}"), back_fp
+            found.append(f"exit->{nid}")
+            continue
+
+        room.observe(ptile, player_tile(pyboy), frontier, moved)
+        if moved == 0:                                    # a bump: wall or object?
+            note = _auto_detect(pyboy, world, rooms, probed, cur_fp, frontier, ptile)
+            if note:
+                found.append(note)
     return f"explored; more of the room left to map{_join(found)}", cur_fp
 
 
@@ -176,8 +223,32 @@ def skill_go_to(pyboy, world, cur_fp, target):
                     new_fp = scene_fingerprint(pyboy)
                     world.seen_scene(new_fp, player_position(pyboy))
                     return f"go_to: crossed into {target}", new_fp
-            return f"go_to: tried to reach {target} but didn't cross", cur_fp
+            # The recorded edge is stale: a room's spawn tile and the geometric
+            # opposite of the entry direction are both unreliable in Deadeus, so a
+            # reverse edge guessed by note_crossing often doesn't cross. Fall back
+            # to a real sweep and learn the true door from the crossing.
+            return _cross_by_sweep(pyboy, world, cur_fp, target)
     return f"go_to: '{target}' isn't a known landmark or connected room", cur_fp
+
+
+def _cross_by_sweep(pyboy, world, cur_fp, target):
+    """Recover a failed edge crossing by deterministically sweeping for the door,
+    then record the REAL edge (direction + door tile) we observed - self-correcting
+    the map. Returns (message, new_fp). If nothing crossed, stays put."""
+    real_dir, door_tile = sweep_for_crossing(pyboy, cur_fp)
+    if real_dir is None:
+        return f"go_to: tried to reach {target} but didn't cross", cur_fp
+    advance_cutscene(pyboy)                      # play any entry scene until movable
+    new_fp = scene_fingerprint(pyboy)
+    world.seen_scene(new_fp, player_position(pyboy))
+    world.connect(cur_fp, real_dir, new_fp, door_tile)  # learn the true edge
+    landed = world.scene_id(new_fp)
+    if landed == target:
+        for d, tid, _door in world.exits_detailed(cur_fp):  # prune stale guesses
+            if tid == target and d != real_dir:
+                world.forget_edge(cur_fp, d, new_fp)
+        return f"go_to: crossed into {target} (corrected the map)", new_fp
+    return f"go_to: aimed for {target}, the open door led to {landed}", new_fp
 
 
 def skill_interact(pyboy, world, cur_fp, target):
@@ -230,7 +301,25 @@ def _dir_to(a, b):
 
 # --- the LLM planner (judgement) ---------------------------------------------
 
-def build_state(world, rooms, cur_fp, pyboy, log):
+def _house_overview(world, rooms, cur_id):
+    """All known rooms and whether each is fully explored (from its RoomMap)."""
+    by_key = {fp_key(fp): rm for fp, rm in rooms.items()}
+    lines = []
+    for s in world.scene_list():
+        rm = by_key.get(s["key"])
+        if rm is None:
+            status = "not visited yet"
+        elif rm.has_unexplored():
+            status = "PARTIALLY explored - unexplored area remains"
+        else:
+            status = "fully explored"
+        here = " (you are here)" if s["id"] == cur_id else ""
+        name = s["id"] + (f" [{s['label']}]" if s["label"] else "")
+        lines.append(f"  {name}: {status}, {s['landmarks']} landmarks{here}")
+    return "\n".join(lines)
+
+
+def build_state(world, rooms, cur_fp, pyboy, log, subgoal):
     """The intent-level state the LLM chooses from (not raw (x, y))."""
     cur_id = world.scene_id(cur_fp)
     label = world.label_of(cur_fp)
@@ -249,7 +338,17 @@ def build_state(world, rooms, cur_fp, pyboy, log):
         explored = ("partially - unexplored tiles remain"
                     if room.nearest_frontier(player_tile(pyboy)) else "fully")
     recent = "; ".join(f"{a} -> {res}" for a, res in log[-4:]) or "nothing yet"
-    return (f"Current room: {room_name}\n"
+    premise = " | ".join(world.knowledge()) or "unknown"
+    house = _house_overview(world, rooms, cur_id)
+    day = game_day(pyboy)
+    left = max(0, 3 - day)
+    time_line = (f"day {day} of 3 - {left} day(s) left before the entity returns. "
+                 "Sleeping in a bed ends the current day.")
+    return (f"Premise (what you know about the game): {premise}\n"
+            f"Time: {time_line}\n"
+            f"Your current plan: {subgoal or 'none yet - decide one from the goal'}\n"
+            f"House so far (all known rooms):\n{house}\n"
+            f"Current room: {room_name}\n"
             f"Known exits: {exits_str}\n"
             f"Landmarks here (things you've read): {lm_str}\n"
             f"Dialogue heard here: {facts_str}\n"
@@ -267,10 +366,11 @@ def plan_intent(state):
     return {"action": action,
             "target": str(c.get("target", "")).strip(),
             "note": str(c.get("note", "")).strip(),
+            "subgoal": str(c.get("subgoal", "")).strip(),
             "why": str(c.get("why", "")).strip()}
 
 
-def main(watch=False):
+def main(watch=False, rounds=INTENT_ROUNDS, delay=0.0):
     OUT.mkdir(parents=True, exist_ok=True)
     pyboy = PyBoy(ROM, window="null")
 
@@ -281,18 +381,24 @@ def main(watch=False):
         from viewer import Viewer
         viewer = Viewer()
         navigation.FRAME_HOOK = viewer.refresh_image
+        llm.WAIT_HOOK = viewer.sleep      # keep the window alive during 429 backoff
+
+    def pace(seconds):                    # viewer-friendly pause between rounds
+        (viewer.sleep if viewer else time.sleep)(seconds)
 
     print(f"LLM backend: {llm.BACKEND} ({llm.model_name()})")
     for _ in range(600):
         pyboy.tick()
-    print(f"skip_intro: reached the game at step {skip_intro(pyboy)}")
+    intro = skip_intro(pyboy)
+    print(f"skip_intro: captured {len(intro)} chars of intro premise")
 
     # Map layer: load the notebook (accumulates across runs), register the
-    # starting scene, and track the current scene fingerprint so a change after
-    # a move becomes a directed edge.
+    # starting scene, and keep the intro premise as world knowledge.
     world = WorldMap.load(WORLD)
     cur_fp = scene_fingerprint(pyboy)
     start_id = world.seen_scene(cur_fp, player_position(pyboy))
+    if intro:
+        world.add_knowledge(intro)
     if viewer:
         viewer.set_overlay(scene=start_id, scenes=world.scene_count,
                            edges=world.edge_count)
@@ -301,8 +407,10 @@ def main(watch=False):
     rooms = {}
     probed = {}   # cur_fp -> set of tiles already interact-probed on a bump
     log = []      # recent (intent-label, result) for the state
+    subgoal = ""  # the LLM's running plan toward the goal (it maintains this)
 
-    for r in range(1, INTENT_ROUNDS + 1):
+    try:
+      for r in range(1, rounds + 1):
         # A dialog is blocking - read it fully into memory (it may hold hints),
         # then it's cleared. Passively-triggered NPC lines land here.
         if dialog_open(pyboy):
@@ -314,11 +422,13 @@ def main(watch=False):
             continue
 
         rooms.setdefault(cur_fp, RoomMap()).mark_floor(player_tile(pyboy))
-        state = build_state(world, rooms, cur_fp, pyboy, log)
+        state = build_state(world, rooms, cur_fp, pyboy, log, subgoal)
         intent = plan_intent(state)
         if intent is None:                      # planner failed -> just explore
             intent = {"action": "explore", "target": "", "note": "",
-                      "why": "fallback"}
+                      "subgoal": "", "why": "fallback"}
+        if intent["subgoal"]:                   # the LLM maintains its own plan
+            subgoal = intent["subgoal"]
 
         action, target = intent["action"], intent["target"]
         if action == "explore":
@@ -333,25 +443,33 @@ def main(watch=False):
         label = action + (f" {target}" if target else "")
         log.append((label, result))
         pyboy.screen.image.save(OUT / f"intent_{r:02d}_{action}.png")
-        print(f"[{r:02d}] {label:14s} why={intent['why'][:36]!r} -> {result}")
+        print(f"[{r:02d}] day{game_day(pyboy)} {label:14s} "
+              f"plan={subgoal[:34]!r} -> {result}")
         if viewer:
-            viewer.set_overlay(round=r, intent=label, result=result[:38],
-                               scene=world.scene_id(cur_fp),
+            viewer.set_overlay(round=r, day=game_day(pyboy), intent=label,
+                               result=result[:38], scene=world.scene_id(cur_fp),
                                scenes=world.scene_count, edges=world.edge_count)
+        if delay:
+            pace(delay)                      # slow the loop down so a watcher can follow
 
-    world.save(WORLD)
+    finally:
+        world.save(WORLD)                    # persist the notebook even on a crash
     print(f"\nScreenshots in {OUT}/")
     print(f"map: {world.scene_count} scene(s), {world.edge_count} connection(s), "
           f"{world.landmark_count} landmark(s) -> {WORLD}")
     if viewer:
         print("Close the viewer window to exit.")
         viewer.wait_close()
-    pyboy.stop()
+    pyboy.stop(save=False)               # never overwrite the user's battery .ram
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Explore Deadeus with the agent.")
     parser.add_argument("--watch", action="store_true",
                         help="open a live window with a perception/decision overlay")
+    parser.add_argument("--rounds", type=int, default=INTENT_ROUNDS,
+                        help=f"number of intent rounds to run (default {INTENT_ROUNDS})")
+    parser.add_argument("--delay", type=float, default=0.0,
+                        help="seconds to pause after each round so a watcher can follow")
     args = parser.parse_args()
-    main(watch=args.watch)
+    main(watch=args.watch, rounds=args.rounds, delay=args.delay)
