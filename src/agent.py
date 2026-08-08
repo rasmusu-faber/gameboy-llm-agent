@@ -47,18 +47,21 @@ INTENT_SYSTEM = (
     "while the room is not fully explored.\n"
     "- go_to <id> : walk to a known landmark (l0, l1, …) or a connected room "
     "(s0, s1, …). Use to revisit an object or to leave through a known exit.\n"
-    "- interact <id> : examine or talk to a known landmark (read its text).\n"
+    "- interact <id> : read/talk to a landmark, but ONLY one listed under "
+    "'Landmarks here'. Those ids live in the CURRENT room. To read something in "
+    "another room, go_to that room FIRST - an id from another room will fail.\n"
     "- remember <note> : write down a short conclusion worth keeping.\n"
-    "You are given a 'House so far' overview of every known room and whether it "
-    "is fully explored. Use it to keep DISCOVERING new ground:\n"
-    "- explore while the CURRENT room still has unexplored area;\n"
-    "- interact with landmarks you have not read yet;\n"
-    "- if the current room is fully explored, DON'T explore again (it does "
-    "nothing) - go_to a room that is only PARTIALLY explored or NOT visited yet "
-    "(use a known exit; prefer a connected one);\n"
-    "- always act in service of your GOAL, not just to wander.\n"
-    "You are told the current day and how many days remain; you have limited time, "
-    "so weigh how you spend it toward the goal.\n"
+    "Exploring only DISCOVERS ground; the POINT is to LEARN and ACT on your goal, "
+    "not to map the whole house. Each turn, prefer in THIS order:\n"
+    "1. If there are UNREAD landmarks here, interact with one - reading and talking "
+    "is how you find clues (an object you've already read gives nothing new).\n"
+    "2. If your plan names a place or person to reach, go_to it and act on it.\n"
+    "3. Otherwise, if this room still has unexplored area, explore it.\n"
+    "4. If this room is fully explored AND its landmarks are read, go_to a "
+    "PARTIALLY-explored or NOT-visited room (prefer a connected exit).\n"
+    "Do NOT explore room after room while unread landmarks or an unmet plan remain. "
+    "You are told the current day and how many days remain; time is limited, so "
+    "weigh it toward the goal.\n"
     "Keep a running plan toward the goal in 'subgoal' and update it as you learn "
     "(e.g. 'find and talk to my family', 'find out how to repay the debt'). "
     "Use 'note' with the remember action to write down anything important.\n"
@@ -251,18 +254,27 @@ def _cross_by_sweep(pyboy, world, cur_fp, target):
     return f"go_to: aimed for {target}, the open door led to {landed}", new_fp
 
 
-def skill_interact(pyboy, world, cur_fp, target):
+def skill_interact(pyboy, world, cur_fp, target, read=None):
     """Walk up to a known landmark, face it, and read its FULL dialogue.
 
     Two-stream model: the conversation goes to the scene's facts (the "heard"
     stream), never overwriting the landmark's first-contact descriptor - so an
     NPC's unfolding lines don't get baked into its identity, only into memory.
-    """
+    `read` (if given) records the id so the state can stop offering it again."""
     lm = world.find_landmark(target) if target else None
     if not lm:
         return f"interact: '{target}' isn't a known landmark", cur_fp
     if lm["scene"] != world.scene_id(cur_fp):
-        return f"interact: {target} is in another room", cur_fp
+        return (f"interact: {target} is in room {lm['scene']}, not here - "
+                f"go_to {lm['scene']} first"), cur_fp
+    if read is not None:
+        # Mark this landmark - and its identical-text clones in this room (multi-
+        # tile objects, or 8 duplicate bookshelves) - as done, so the state stops
+        # re-offering it. Done up front so an UNREACHABLE landmark is also retired
+        # (otherwise "unread + can't reach" loops forever).
+        same = [o["id"] for o in world.landmarks_of(cur_fp)
+                if lm["text"] and o["text"] == lm["text"]]
+        read.update(same or [target])
     tx, ty = lm["tile"]
     walk_to(pyboy, tx * TILE, ty * TILE)        # stops adjacent (object blocks)
     face = _dir_to(player_tile(pyboy), (tx, ty))
@@ -319,8 +331,12 @@ def _house_overview(world, rooms, cur_id):
     return "\n".join(lines)
 
 
-def build_state(world, rooms, cur_fp, pyboy, log, subgoal):
-    """The intent-level state the LLM chooses from (not raw (x, y))."""
+def build_state(world, rooms, cur_fp, pyboy, log, subgoal, read=None):
+    """The intent-level state the LLM chooses from (not raw (x, y)). `read` is the
+    set of landmark ids already interacted with this run - used to surface which
+    landmarks are still worth reading, so the agent acts instead of re-reading or
+    mapping endlessly."""
+    read = read or set()
     cur_id = world.scene_id(cur_fp)
     label = world.label_of(cur_fp)
     room_name = cur_id + (f" ({label})" if label else "")
@@ -329,6 +345,15 @@ def build_state(world, rooms, cur_fp, pyboy, log, subgoal):
     lms = world.landmarks_of(cur_fp)
     lm_str = "; ".join(f'{lm["id"]} @ {lm["tile"]}: "{lm["text"]}"'
                        for lm in lms) or "none yet"
+    here_ids = ", ".join(lm["id"] for lm in lms) or "none"
+    # Unread landmarks, de-duplicated by text (multi-tile objects create clones):
+    # show one representative id per distinct text so the agent doesn't re-read.
+    unread, seen_txt = [], set()
+    for lm in lms:
+        if lm["id"] not in read and lm["text"] not in seen_txt:
+            seen_txt.add(lm["text"])
+            unread.append(f'{lm["id"]} "{lm["text"]}"')
+    unread_str = "; ".join(unread) or "none - all read here"
     facts = world.facts_of(cur_fp)
     facts_str = " | ".join(facts) or "none yet"
     room = rooms.get(cur_fp)
@@ -337,7 +362,12 @@ def build_state(world, rooms, cur_fp, pyboy, log, subgoal):
     else:
         explored = ("partially - unexplored tiles remain"
                     if room.nearest_frontier(player_tile(pyboy)) else "fully")
-    recent = "; ".join(f"{a} -> {res}" for a, res in log[-4:]) or "nothing yet"
+    # Drop the "; found lN(...)" landmark dump from past results: those ids belong
+    # to whatever room they were found in, and dangling them here tempted models to
+    # interact with landmarks that aren't in the current room. The interactable set
+    # is 'Landmarks here' only.
+    recent = "; ".join(f"{a} -> {res.split('; found ')[0]}"
+                       for a, res in log[-4:]) or "nothing yet"
     premise = " | ".join(world.knowledge()) or "unknown"
     house = _house_overview(world, rooms, cur_id)
     day = game_day(pyboy)
@@ -350,7 +380,9 @@ def build_state(world, rooms, cur_fp, pyboy, log, subgoal):
             f"House so far (all known rooms):\n{house}\n"
             f"Current room: {room_name}\n"
             f"Known exits: {exits_str}\n"
-            f"Landmarks here (things you've read): {lm_str}\n"
+            f"Landmarks here (the ONLY ids you can interact with now): {here_ids}\n"
+            f"UNREAD landmarks here (worth interacting with): {unread_str}\n"
+            f"  details: {lm_str}\n"
             f"Dialogue heard here: {facts_str}\n"
             f"Room explored: {explored}\n"
             f"Goal: {GOAL}\n"
@@ -406,6 +438,7 @@ def main(watch=False, rounds=INTENT_ROUNDS, delay=0.0):
     # Mini-map perception: one local occupancy map per scene, built from moves.
     rooms = {}
     probed = {}   # cur_fp -> set of tiles already interact-probed on a bump
+    read = set()  # landmark ids already interacted with (so we act, not re-read)
     log = []      # recent (intent-label, result) for the state
     subgoal = ""  # the LLM's running plan toward the goal (it maintains this)
 
@@ -422,7 +455,7 @@ def main(watch=False, rounds=INTENT_ROUNDS, delay=0.0):
             continue
 
         rooms.setdefault(cur_fp, RoomMap()).mark_floor(player_tile(pyboy))
-        state = build_state(world, rooms, cur_fp, pyboy, log, subgoal)
+        state = build_state(world, rooms, cur_fp, pyboy, log, subgoal, read)
         intent = plan_intent(state)
         if intent is None:                      # planner failed -> just explore
             intent = {"action": "explore", "target": "", "note": "",
@@ -436,15 +469,16 @@ def main(watch=False, rounds=INTENT_ROUNDS, delay=0.0):
         elif action == "go_to":
             result, cur_fp = skill_go_to(pyboy, world, cur_fp, target)
         elif action == "interact":
-            result, cur_fp = skill_interact(pyboy, world, cur_fp, target)
+            result, cur_fp = skill_interact(pyboy, world, cur_fp, target, read)
         else:  # remember
             result = skill_remember(world, cur_fp, intent["note"])
 
         label = action + (f" {target}" if target else "")
         log.append((label, result))
         pyboy.screen.image.save(OUT / f"intent_{r:02d}_{action}.png")
-        print(f"[{r:02d}] day{game_day(pyboy)} {label:14s} "
-              f"plan={subgoal[:34]!r} -> {result}")
+        why = str(intent.get("why", ""))[:48]
+        print(f"[{r:02d}] day{game_day(pyboy)} {label:14s} why={why!r}\n"
+              f"      plan={subgoal[:48]!r} -> {result}")
         if viewer:
             viewer.set_overlay(round=r, day=game_day(pyboy), intent=label,
                                result=result[:38], scene=world.scene_id(cur_fp),

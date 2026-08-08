@@ -389,3 +389,36 @@ That evolution is the point; the log is not rewritten to hide it. Dead-ends stay
   the bedroom is mapped fully, the agent stays in s0, and the **bed is discovered by
   bumping** as l12 @ (6,14) "Time for bed?..." - no seeding. `test_skills` updated
   from the old "explore should leave" contract to "maps fully, stays put".
+- **Model comparison + "act, don't just map" rebalance.** With the day visible and a
+  `why` logged per round, ran the same 14-round harness across models. `llama-3.1-8b`
+  is too small: one static generic plan, no synthesis from what it reads, wastes
+  rounds on invalid interacts. `llama-3.3-70b` is clearly better: plans evolve,
+  it names "the girl next door" from s1 dialogue, clean room-by-room progress - but
+  it NEVER interacts, it maps outward forever and defers its own goal. `gpt-oss-20b`
+  had the best instinct (it tried to READ landmarks for clues) but looped re-reading
+  the same objects. Two fixes followed, both state-clarity not model size: (1) an
+  action-first prompt (interact UNREAD landmarks / pursue the plan BEFORE mapping
+  new rooms); (2) read-tracking (a `read` set surfaced as an "unread landmarks"
+  line; interacting retires a landmark and its identical-text clones, and retires
+  unreachable ones, killing the re-read and can't-reach loops). Plus: an allow-list
+  of the current room's landmark ids and dropping the `found lN` id-leak from Recent
+  actions, which had caused wrong-room interacts. Result: both 70B and gpt-oss-20b
+  now mix explore/interact/go_to, read the NPC hints, and evolve a "find people"
+  plan - **gpt-oss-20b ≈ 70B behaviour at a fraction of the cost once scaffolded.**
+  Takeaway (the recurring theme): perception/state design is a bigger lever than
+  model size. The day byte itself stayed unused (still day 1 - no time pressure yet).
+- **Deep-room navigation root cause: scene_fingerprint collides outdoors.** `go_to`
+  in the town lands in the wrong room / ping-pongs. The recorded graph gave it away:
+  self-loops (`s2 --left--> s2`) and contradictions (`s2 --up--> s1` AND `--up-->
+  s2`) can only happen if physically different screens hash to the same fingerprint.
+  The town is one big GB Studio scene navigated by camera "chunks", and many chunks
+  share a background tilemap. Rather than script into the outdoor area (unreliable -
+  the very bug), added `exploration/manual_scan.py`: the user plays manually while
+  it logs WRAM per screen transition (written continuously so a hard window-close
+  can't lose it). Over 30 screens (6 fingerprints recurred), fingerprint alone =
+  17 unique; **`(fingerprint, camera 0xC0B7/0xC0B8)` = 28**, separating every
+  look-alike and collapsing only genuine revisits (camera at the transition frame
+  is grid-aligned and stable per chunk). So there is NO single "scene id" byte - the
+  identity is fingerprint + camera. Fix (documented, not built; high blast radius):
+  a `scene_key = (fingerprint, camera//8)` migrated through WorldMap/RoomMap/tests.
+  Data kept in `runs/manual_scan.pkl` to calibrate + validate.

@@ -1,5 +1,10 @@
 # pokemon-llm-agent
 
+![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
+![LLM](https://img.shields.io/badge/LLM-Ollama%20(local)-000000)
+![Emulator](https://img.shields.io/badge/Emulator-PyBoy-5A9FD4)
+![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
+
 **Can a small, *local* language model play a Game Boy game — with no vision model,
 seeing the world only by reading the emulator's memory?**
 
@@ -106,3 +111,9 @@ pokemon-llm-agent/
 
 An RL agent on the same task, then an LLM-vs-RL comparison — the recurring
 "compare the methods honestly" theme of these projects.
+
+## License
+
+Code released under the [MIT License](LICENSE). The Deadeus ROM is **not** part of
+this repository and is not covered by this license — obtain it from the developer
+at <https://izma.itch.io/deadeus>.
