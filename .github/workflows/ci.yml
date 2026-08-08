@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    name: ROM-free unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The map (memory.py) and occupancy-map (roommap.py) layers are kept
+      # emulator-free by design, so they unit-test with no ROM, no PyBoy, and no
+      # third-party dependencies - fast and reproducible in CI. The ROM-dependent
+      # and LLM-dependent tests need the Deadeus ROM / a running model and are run
+      # locally (see README).
+      - name: Run unit tests
+        run: |
+          python tests/test_memory_map.py
+          python tests/test_roommap.py

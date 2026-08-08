@@ -422,3 +422,21 @@ That evolution is the point; the log is not rewritten to hide it. Dead-ends stay
   identity is fingerprint + camera. Fix (documented, not built; high blast radius):
   a `scene_key = (fingerprint, camera//8)` migrated through WorldMap/RoomMap/tests.
   Data kept in `runs/manual_scan.pkl` to calibrate + validate.
+- **Scene-identity via camera: implemented, DISPROVEN, reverted.** Acting on the
+  manual-scan result, tried `scene_key = (fingerprint, camera 0xC0B7/0xC0B8)` as the
+  room identity (fingerprint stays the crossing detector; camera read at entry;
+  memory/RoomMap/tests migrated). The ROM tests immediately caught the flaw: the
+  SAME room got a DIFFERENT key on re-entry (`test_explore_full_room`: "explore left
+  the bedroom (now s2)"; `test_reverse_crossing`: "should have returned to s0"). Why:
+  0xC0B7/0xC0B8 is entry-/position-dependent (in the house it tracks ~the player),
+  so entering a room from a different door yields a different camera → the same room
+  splits into multiple nodes. The manual-scan "28 unique of 30" was misleading - the
+  user happened to cross each look-alike the SAME way, so the entry camera was
+  incidentally consistent; it is NOT a room-invariant. A quantisation that keeps a
+  whole room in one bucket (rooms span >64 px of camera) would also merge distinct
+  chunks (>=64 px apart) - the two constraints conflict, so camera can't be the key.
+  Reverted cleanly. **Collisions remain real (open issue #7); the camera is not the
+  fix.** A true per-screen invariant is still needed (candidates: a GB Studio scene
+  index if one exists - the block-constant bytes 0xC032/0xC122 seen in the scan are
+  worth chasing; or global position quantised to a chunk grid IF a stable global
+  coordinate exists). `exploration/manual_scan.py` + `runs/manual_scan.pkl` kept.

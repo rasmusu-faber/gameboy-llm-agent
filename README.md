@@ -1,5 +1,6 @@
 # pokemon-llm-agent
 
+![CI](https://github.com/rasmusfaber-ai/pokemon-llm-agent/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
 ![LLM](https://img.shields.io/badge/LLM-Ollama%20(local)-000000)
 ![Emulator](https://img.shields.io/badge/Emulator-PyBoy-5A9FD4)
@@ -42,9 +43,12 @@ work.
 - **Reach the game on its own.** It clicks through Deadeus's long, partly
   unskippable intro by pressing A while a dialog is on screen, and confirms it has
   real control with a *reversible* movement test. (`skip_intro`)
-- **Navigate reliably.** Deterministic tile-by-tile movement, plus a mini-map the
-  agent builds from its own moves (floor where it has walked, walls where a move
-  was blocked) fed into the planner's prompt. (`src/navigation.py`, `src/roommap.py`)
+- **Navigate a room reliably — indoors.** Deterministic tile-by-tile movement,
+  plus a mini-map the agent builds from its own moves (floor where it has walked,
+  walls where a move was blocked) fed into the planner's prompt. Inside the house
+  this is solid, verified end-to-end; open-air navigation is not yet reliable (a
+  scene-fingerprint collision outdoors — see [Status](#status--what-works-what-doesnt)).
+  (`src/navigation.py`, `src/roommap.py`)
 - **Remember.** A Markdown notebook (`world.md`) the agent writes as it plays:
   scenes are identified by a per-room *fingerprint* (a hash of the full background
   tilemap) and connected into a map. Writing is split — code records what it
@@ -55,6 +59,40 @@ work.
 Current focus: getting from "explore a room" to "explore, map, read every NPC, and
 pursue a goal (reach a non-violent ending)." Status and the full blow-by-blow are
 in the design log.
+
+## Status — what works, what doesn't
+
+This is an honest work-in-progress, not a finished product. The value is the
+*architecture and the investigation*, not a bot that beats the game.
+
+**Works (verified by the test suite — 14 ROM/logic tests pass):**
+- Model-free perception: player position, on-screen text (ROM-font OCR), dialog
+  state, per-scene fingerprint, and the in-game day counter.
+- Deterministic skills: `walk_to`, edge-sweep door-finding, `interact`, full-room
+  exploration without bouncing out the first door, reverse-crossing (with a
+  self-correcting map), and Yes/No **safety** (the agent never auto-confirms a
+  consequential choice like sleeping).
+- The intent loop end-to-end: the LLM picks `explore` / `go_to` / `interact` /
+  `remember`, a deterministic skill runs it, and a persistent map notebook grows.
+- A swappable LLM backend (local Ollama ↔ any OpenAI-compatible cloud).
+
+**Partial / rough:**
+- Landmark capture is noisy: a multi-tile bookshelf becomes several identical "So
+  many books" landmarks; the typewriter effect truncates some captured lines.
+- Returning through a known door currently re-runs the edge-sweep each time
+  (correct, but not cheap).
+
+**Not working yet / open problems:**
+- **The headline finding: a 3B–8B model is the weak link.** The deterministic
+  scaffolding does the heavy lifting; small models plan repetitively and reason
+  poorly about space. Getting the boundary right (reflex vs. judgement) *is* the
+  project — see the design log's A/B tests.
+- **Outdoor navigation is broken (open issue #7).** The town is one large scene
+  navigated by camera "chunks" that share a background tilemap, so the
+  scene-fingerprint collides and `go_to` ping-pongs. Indoors is unaffected. A true
+  per-screen invariant is still needed (a camera-based fix was tried and disproven).
+- Cross-room routing over more than two rooms (map-graph BFS) isn't built yet.
+- The game is **not** played to an ending; the agent explores a few indoor rooms.
 
 ## The design log is the point
 
