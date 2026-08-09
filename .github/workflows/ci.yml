@@ -27,3 +27,4 @@ jobs:
           python tests/test_memory_map.py
           python tests/test_roommap.py
           python tests/test_dialog_merge.py
+          python tests/test_odometry.py
