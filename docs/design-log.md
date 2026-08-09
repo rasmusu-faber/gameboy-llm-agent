@@ -440,3 +440,38 @@ That evolution is the point; the log is not rewritten to hide it. Dead-ends stay
   index if one exists - the block-constant bytes 0xC032/0xC122 seen in the scan are
   worth chasing; or global position quantised to a chunk grid IF a stable global
   coordinate exists). `exploration/manual_scan.py` + `runs/manual_scan.pkl` kept.
+- **Notebook cleanup: landmark de-dup + typewriter text merge.** A 70B run over
+  Groq exposed that the two "noisy landmark / doubled text" caveats were not
+  cosmetic - they dominated the notebook and wasted rounds. A wide bookshelf became
+  **eight** `l0..l7` "So many books" landmarks and the agent re-read the clones for
+  half the run; captured dialogue doubled at every page boundary ("you can you can
+  save", "You soun You sounded", "next door came door came"). Two contained fixes,
+  each unit-tested with no ROM (now in CI): (1) `WorldMap.add_landmark` de-dupes by
+  identical descriptor within a scene, collapsing a multi-tile object to one entry;
+  (2) `navigation.merge_dialog` assembles typewriter fragments by dropping partial
+  re-renders, merging word-overlap at page breaks (incl. a truncated boundary word,
+  `havin` -> `having`), and collapsing immediately-repeated runs. Result on a fresh
+  70B run: **19 landmarks -> 7**, and facts now read as written ("You know, I think
+  that girl has a bit of a thing for you!... take her some flowers... find some
+  around the area!") - the clue is finally usable. (`tests/test_dialog_merge.py`,
+  extended `tests/test_memory_map.py`.)
+- **Breaking the 2-room local optimum: explore to completion.** Even with a clean
+  notebook, the 70B agent mapped the bedroom + living room, read everything, then
+  oscillated `s0 <-> s1` forever - it never found the living room's exit to the
+  outside. Diagnosis (one targeted probe, not a rabbit-hole - the game fact "the
+  exit is the bottom door, walk-through" was confirmed with the user first):
+  continuous `skill_explore` *does* find that bottom exit (`explore[1]: found
+  exit->s2`), but the LLM kept **interrupting** explore with `interact`/`go_to`,
+  which pulled the player back to the mapped area, so a single 25-tile pass never
+  reached the far door and the room got declared "fully mapped" without it. A
+  deterministic edge-sweep was tried as the fix and **rejected**: it re-crosses the
+  known door (the house door is crossable from two edges - `up` *and* `right` both
+  land in s0) and its push-phase check misses the far bottom door. The real fix is
+  simpler: `explore_to_completion` loops the deterministic pass until the room is
+  fully mapped or a NEW scene appears - no extra LLM calls. Verified end-to-end: a
+  fresh 70B run reaches **4 scenes** (bedroom -> living room -> town -> a further
+  outdoor screen), reading a "The local School" sign; guarded by
+  `tests/test_explore_reaches_town.py`. Honest new frontier: the moment the agent is
+  outside, **issue #7** bites for real - the town's camera-chunks collide on the
+  fingerprint, so `s2` sprouts self-loops (`s2 --left--> s2`) and outdoor `interact`
+  often can't reach a landmark. Clean town navigation is the next problem.

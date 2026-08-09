@@ -191,6 +191,24 @@ def skill_explore(pyboy, world, rooms, probed, cur_fp):
     return f"explored; more of the room left to map{_join(found)}", cur_fp
 
 
+def explore_to_completion(pyboy, world, rooms, probed, cur_fp):
+    """Run explore passes until the room is fully mapped OR a new room turns up.
+
+    One `skill_explore` pass walks a bounded budget, and interleaving other intents
+    between partial passes was letting a far exit (the living room's bottom door to
+    the town) go undiscovered - so the agent oscillated between the two rooms it
+    knew. Looping the deterministic pass here (no extra LLM calls) is what actually
+    reaches the next area; it stops early on a new room so the planner decides what
+    to do with it. Returns (result, cur_fp)."""
+    scenes_before = world.scene_count
+    result = "explored; more of the room left to map"
+    for _ in range(EXPLORE_PASSES):
+        result, cur_fp = skill_explore(pyboy, world, rooms, probed, cur_fp)
+        if "fully mapped" in result or world.scene_count > scenes_before:
+            break
+    return result, cur_fp
+
+
 def skill_go_to(pyboy, world, cur_fp, target):
     """Walk to a known landmark (same room) or cross to a connected room.
 
@@ -466,19 +484,7 @@ def main(watch=False, rounds=INTENT_ROUNDS, delay=0.0):
 
         action, target = intent["action"], intent["target"]
         if action == "explore":
-            # Run explore to true completion within ONE intent: keep mapping until
-            # the room is fully covered or a NEW room turns up. A single 25-tile
-            # budget can stall in a large room, and interleaving other intents
-            # between partial explores was letting a far exit (the living room's
-            # bottom door) go undiscovered - so the agent oscillated between the two
-            # rooms it knew. Looping here (deterministic, no extra LLM calls) is what
-            # actually finds the next area. Stops early on a new room so the planner
-            # gets to decide what to do with it.
-            scenes_before = world.scene_count
-            for _ in range(EXPLORE_PASSES):
-                result, cur_fp = skill_explore(pyboy, world, rooms, probed, cur_fp)
-                if "fully mapped" in result or world.scene_count > scenes_before:
-                    break
+            result, cur_fp = explore_to_completion(pyboy, world, rooms, probed, cur_fp)
         elif action == "go_to":
             result, cur_fp = skill_go_to(pyboy, world, cur_fp, target)
         elif action == "interact":

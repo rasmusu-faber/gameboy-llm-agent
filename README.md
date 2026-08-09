@@ -65,34 +65,38 @@ in the design log.
 This is an honest work-in-progress, not a finished product. The value is the
 *architecture and the investigation*, not a bot that beats the game.
 
-**Works (verified by the test suite — 14 ROM/logic tests pass):**
+**Works (verified by the test suite — 18 ROM/logic tests pass):**
 - Model-free perception: player position, on-screen text (ROM-font OCR), dialog
   state, per-scene fingerprint, and the in-game day counter.
 - Deterministic skills: `walk_to`, edge-sweep door-finding, `interact`, full-room
   exploration without bouncing out the first door, reverse-crossing (with a
   self-correcting map), and Yes/No **safety** (the agent never auto-confirms a
   consequential choice like sleeping).
+- Clean map notebook: multi-tile objects de-dupe to one landmark, and typewriter
+  overlap in captured dialogue is merged out (no more "you can you can save").
+- **Breaks out of the house.** One `explore` intent maps a room to completion and
+  follows its far exits, so the agent gets from the bedroom through the living room
+  and **out into the town** — a third area — reading environment text like a
+  "The local School" sign (verified deterministically, `test_explore_reaches_town`).
 - The intent loop end-to-end: the LLM picks `explore` / `go_to` / `interact` /
   `remember`, a deterministic skill runs it, and a persistent map notebook grows.
 - A swappable LLM backend (local Ollama ↔ any OpenAI-compatible cloud).
-
-**Partial / rough:**
-- Landmark capture is noisy: a multi-tile bookshelf becomes several identical "So
-  many books" landmarks; the typewriter effect truncates some captured lines.
-- Returning through a known door currently re-runs the edge-sweep each time
-  (correct, but not cheap).
 
 **Not working yet / open problems:**
 - **The headline finding: a 3B–8B model is the weak link.** The deterministic
   scaffolding does the heavy lifting; small models plan repetitively and reason
   poorly about space. Getting the boundary right (reflex vs. judgement) *is* the
   project — see the design log's A/B tests.
-- **Outdoor navigation is broken (open issue #7).** The town is one large scene
-  navigated by camera "chunks" that share a background tilemap, so the
-  scene-fingerprint collides and `go_to` ping-pongs. Indoors is unaffected. A true
+- **Town navigation isn't clean yet (open issue #7).** The agent now *reaches* the
+  town, but the town is one large scene navigated by camera "chunks" that share a
+  background tilemap, so the scene-fingerprint collides: `go_to` ping-pongs and the
+  map grows spurious self-loops (`s2 --> s2`). Indoors is unaffected. A true
   per-screen invariant is still needed (a camera-based fix was tried and disproven).
+- Reaching/reading landmarks **outdoors** often fails (`walk_to` can't get beside
+  them in the open area) — tied to the same collision problem.
 - Cross-room routing over more than two rooms (map-graph BFS) isn't built yet.
-- The game is **not** played to an ending; the agent explores a few indoor rooms.
+- The game is **not** played to an ending; progress currently stops at clean town
+  navigation.
 
 ## The design log is the point
 
