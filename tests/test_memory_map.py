@@ -56,6 +56,21 @@ def main():
                                       "text": "It was just a bad dream"}
     assert wm.find_landmark("l9") is None
 
+    # Multi-tile object de-dup: an adjacent tile with the SAME descriptor is the
+    # same object (a wide bookshelf), so it reuses the landmark instead of adding
+    # an l1 clone - the notebook keeps one entry per real object. (Kept on the main
+    # map, which must still hold exactly l0 so the counter assertions below hold.)
+    assert wm.add_landmark(BEDROOM, (11, 6), "It was just a bad dream") == "l0"
+    assert len(wm.landmarks_of(BEDROOM)) == 1
+    # A genuinely different descriptor is still its own landmark (fresh map, so the
+    # counter on `wm` is untouched).
+    dm = M.WorldMap()
+    dm.seen_scene(BEDROOM, (0, 0))
+    assert dm.add_landmark(BEDROOM, (5, 7), "So many books") == "l0"
+    assert dm.add_landmark(BEDROOM, (6, 7), "So many books") == "l0"   # clone -> reused
+    assert dm.add_landmark(BEDROOM, (6, 14), "Time for bed?..") == "l1"  # different -> new
+    assert len(dm.landmarks_of(BEDROOM)) == 2
+
     # World knowledge (the intro premise): global, deduped, round-tripped.
     wm.add_knowledge("You have three days. Harm no one.")
     wm.add_knowledge("You have three days. Harm no one.")   # dedup

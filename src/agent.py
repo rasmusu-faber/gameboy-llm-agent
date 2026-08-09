@@ -30,7 +30,8 @@ _DELTA = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}
 
 ROM = "roms/Deadeus.gb"
 INTENT_ROUNDS = 15                      # one LLM judgement call per round
-EXPLORE_BUDGET = 25                     # max tiles a single explore intent walks
+EXPLORE_BUDGET = 25                     # max tiles a single skill_explore pass walks
+EXPLORE_PASSES = 8                      # skill_explore passes per explore intent (see main)
 SKILLS = ("explore", "go_to", "interact", "remember")
 GOAL = ("You are the boy from the intro. You have THREE DAYS before the entity "
         "returns to destroy everyone unless the debt is repaid. Find out what is "
@@ -465,7 +466,19 @@ def main(watch=False, rounds=INTENT_ROUNDS, delay=0.0):
 
         action, target = intent["action"], intent["target"]
         if action == "explore":
-            result, cur_fp = skill_explore(pyboy, world, rooms, probed, cur_fp)
+            # Run explore to true completion within ONE intent: keep mapping until
+            # the room is fully covered or a NEW room turns up. A single 25-tile
+            # budget can stall in a large room, and interleaving other intents
+            # between partial explores was letting a far exit (the living room's
+            # bottom door) go undiscovered - so the agent oscillated between the two
+            # rooms it knew. Looping here (deterministic, no extra LLM calls) is what
+            # actually finds the next area. Stops early on a new room so the planner
+            # gets to decide what to do with it.
+            scenes_before = world.scene_count
+            for _ in range(EXPLORE_PASSES):
+                result, cur_fp = skill_explore(pyboy, world, rooms, probed, cur_fp)
+                if "fully mapped" in result or world.scene_count > scenes_before:
+                    break
         elif action == "go_to":
             result, cur_fp = skill_go_to(pyboy, world, cur_fp, target)
         elif action == "interact":

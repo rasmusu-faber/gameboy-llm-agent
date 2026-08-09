@@ -190,6 +190,16 @@ class WorldMap:
                 if text and not lm["text"]:     # first descriptor only
                     lm["text"] = text
                 return lm["id"]
+        # De-dup multi-tile objects: a wide bookshelf or a 2-tile bed is one object
+        # spread over adjacent tiles, but bumping each tile would otherwise create
+        # l0..l7 clones with identical text. Reuse the existing landmark when the
+        # descriptor matches, so the notebook holds one entry per real object (and
+        # the agent stops wasting turns re-reading clones). Only non-empty text
+        # de-dups - blank placeholders stay tile-keyed.
+        if text:
+            for lm in scene["landmarks"]:
+                if lm["text"] == text:
+                    return lm["id"]
         lid = f"l{self._next_landmark}"
         self._next_landmark += 1
         scene["landmarks"].append({"id": lid, "tile": tile, "text": text})
