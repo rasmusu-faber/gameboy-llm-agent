@@ -24,6 +24,7 @@ from navigation import (
 )
 from memory import WorldMap, fp_key
 from roommap import RoomMap
+from crossing import is_crossing_move
 import llm
 
 _DELTA = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}
@@ -163,25 +164,35 @@ def skill_explore(pyboy, world, rooms, probed, cur_fp):
         frontier = room.nearest_frontier(ptile)
         if frontier is None:
             return f"explored; room fully mapped{_join(found)}", cur_fp
+        pbefore = player_position(pyboy)
         moved = walk_direction(pyboy, frontier, max_tiles=1)
 
-        if scene_fingerprint(pyboy) != cur_fp:            # bumped a door and crossed
-            heard = advance_cutscene(pyboy)               # play any entry scene
-            new_fp = scene_fingerprint(pyboy)
-            nid = world.seen_scene(new_fp, player_position(pyboy))
-            world.note_crossing(cur_fp, frontier, new_fp,
-                                door_tile=ptile, spawn_tile=player_tile(pyboy))
-            if heard:
-                world.add_fact(new_fp, heard)             # entry dialogue -> hints
-            dx, dy = _DELTA[frontier]
-            room.mark_wall((ptile[0] + dx, ptile[1] + dy))  # fence this doorway
-            _, back_fp = skill_go_to(pyboy, world, new_fp, world.scene_id(cur_fp))
-            if back_fp != cur_fp:                         # couldn't return -> accept it
-                note = f" (scene: {heard[:24]!r})" if heard else ""
-                return (f"explored; found exit to {nid} but stayed there"
-                        f"{_join(found)}{note}"), back_fp
-            found.append(f"exit->{nid}")
-            continue
+        if scene_fingerprint(pyboy) != cur_fp:            # the fingerprint changed...
+            heard = advance_cutscene(pyboy)               # ...settle to a movable state,
+            new_fp = scene_fingerprint(pyboy)             # and re-read the fingerprint
+            # A real crossing must land on a DIFFERENT screen AND teleport the player
+            # (not a continuous scroll step). At a town edge the fingerprint briefly
+            # flickers and the player shifts a tile while STAYING on this screen -
+            # is_crossing_move alone was fooled into recording a self-loop (s2->s2);
+            # requiring new_fp != cur_fp rejects that.
+            if new_fp != cur_fp and is_crossing_move(pbefore, player_position(pyboy), frontier):
+                nid = world.seen_scene(new_fp, player_position(pyboy))
+                world.note_crossing(cur_fp, frontier, new_fp,
+                                    door_tile=ptile, spawn_tile=player_tile(pyboy))
+                if heard:
+                    world.add_fact(new_fp, heard)         # entry dialogue -> hints
+                dx, dy = _DELTA[frontier]
+                room.mark_wall((ptile[0] + dx, ptile[1] + dy))  # fence this doorway
+                _, back_fp = skill_go_to(pyboy, world, new_fp, world.scene_id(cur_fp))
+                if back_fp != cur_fp:                     # couldn't return -> accept it
+                    note = f" (scene: {heard[:24]!r})" if heard else ""
+                    return (f"explored; found exit to {nid} but stayed there"
+                            f"{_join(found)}{note}"), back_fp
+                found.append(f"exit->{nid}")
+                continue
+            # else: a SCROLLING screen ticked the fingerprint while the player walked
+            # on within the SAME physical screen - not a crossing. Keep cur_fp and
+            # treat it as a normal step, so a scroll can't invent a node per tile.
 
         room.observe(ptile, player_tile(pyboy), frontier, moved)
         if moved == 0:                                    # a bump: wall or object?
@@ -243,8 +254,9 @@ def skill_go_to(pyboy, world, cur_fp, target):
                 if scene_fingerprint(pyboy) != cur_fp:
                     advance_cutscene(pyboy)     # play any entry scene until movable
                     new_fp = scene_fingerprint(pyboy)
-                    world.seen_scene(new_fp, player_position(pyboy))
-                    return f"go_to: crossed into {target}", new_fp
+                    if new_fp != cur_fp:        # a real crossing lands on another screen
+                        world.seen_scene(new_fp, player_position(pyboy))
+                        return f"go_to: crossed into {target}", new_fp
             # The recorded edge is stale: a room's spawn tile and the geometric
             # opposite of the entry direction are both unreliable in Deadeus, so a
             # reverse edge guessed by note_crossing often doesn't cross. Fall back
@@ -262,6 +274,8 @@ def _cross_by_sweep(pyboy, world, cur_fp, target):
         return f"go_to: tried to reach {target} but didn't cross", cur_fp
     advance_cutscene(pyboy)                      # play any entry scene until movable
     new_fp = scene_fingerprint(pyboy)
+    if new_fp == cur_fp:                         # the sweep flickered at a town edge but
+        return f"go_to: tried to reach {target} but didn't cross", cur_fp  # never crossed
     world.seen_scene(new_fp, player_position(pyboy))
     world.connect(cur_fp, real_dir, new_fp, door_tile)  # learn the true edge
     landed = world.scene_id(new_fp)
@@ -494,6 +508,7 @@ def main(watch=False, rounds=INTENT_ROUNDS, delay=0.0):
 
         label = action + (f" {target}" if target else "")
         log.append((label, result))
+        world.save(WORLD)                    # persist per round (a hard kill skips finally)
         pyboy.screen.image.save(OUT / f"intent_{r:02d}_{action}.png")
         why = str(intent.get("why", ""))[:48]
         print(f"[{r:02d}] day{game_day(pyboy)} {label:14s} why={why!r}\n"

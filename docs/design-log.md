@@ -475,3 +475,40 @@ That evolution is the point; the log is not rewritten to hide it. Dead-ends stay
   outside, **issue #7** bites for real - the town's camera-chunks collide on the
   fingerprint, so `s2` sprouts self-loops (`s2 --left--> s2`) and outdoor `interact`
   often can't reach a landmark. Clean town navigation is the next problem.
+- **Issue #7 (town self-loops) - the long way round to a two-line fix.** The
+  working theory (above) was that the outdoor fingerprint *collides* - different
+  town screens sharing a background tilemap - so the plan was a better scene
+  identity. That theory was **wrong**, and chasing it produced a chain of dead-ends
+  worth recording so nobody re-treads them:
+  (1) **Grid odometry** (a `scene_key` = a coordinate advanced by crossing
+  direction, with the fingerprint demoted to a crossing *detector*). Built the whole
+  thing - an `Odometer`, a drift-tolerant `WorldMap.match`, `Loc` threaded through
+  every skill. It fell apart on two Deadeus realities: the doors are **non-Euclidean**
+  (the way back is not the geometric opposite - reverse-crossing already taught us
+  this), so exact-coord matching broke indoor returns; and a **scrolling** town
+  screen ticks the fingerprint every step, so "any fp change is a crossing" advanced
+  the odometer per tile and **exploded the map to 42 nodes**. A lenient match
+  self-looped; an exact one duplicated. Reverted entirely.
+  (2) **Animation-robust fingerprint** - the hypothesis that the fp *oscillates*
+  from animated background tiles (the fountain/waterfall). Measured it with
+  `anim_probe`: **0 changing background tiles** on every screen, even the waterfall
+  (which animates on sprites/palette, not the bg tilemap). Disproven; the fp is
+  perfectly stable per screen. `settled_fingerprint` (wait for the fp to stabilise
+  after a crossing) was built on the same false premise and was pure overhead.
+  The turning point was the user's **game knowledge**: the neighbouring town screens
+  look *clearly different* - so there are **no real collisions at all**. That
+  reframed it from "identity" to "why does a crossing get *recorded* wrongly?" A
+  **deterministic instrumented drive** to s2 (no LLM, XDBG-logging every crossing)
+  answered it in minutes: at a town EDGE the fingerprint briefly **flickers** and
+  the player shifts a tile while STAYING on the same screen; the detector fired and
+  `is_crossing_move` (the scroll-tick guard, added earlier) was fooled by the 16px
+  edge shift, so a crossing was recorded whose **`new_fp == cur_fp`** = a self-loop.
+  **The fix is two ideas, both tiny:** a real crossing must (a) land on a DIFFERENT
+  fingerprint (`new_fp != cur_fp`, added to all three crossing paths) and (b) be a
+  teleport, not a continuous step (`crossing.is_crossing_move`: a scroll-tick lands
+  exactly one tile along the walk; a crossing jumps to a spawn, often *against* the
+  pressed direction). Validated by `tests/test_no_town_selfloops.py` (deterministic)
+  and a full 24-round **gpt-oss-20b** run: **7 scenes, 0 self-loops**, a navigable
+  town. The odometry/match scaffolding was then deleted. **Lesson: the fingerprint
+  was fine all along - the bug was in *when a crossing is recorded*, not in the
+  *identity*. Reach for a deterministic reproduction before the next hypothesis.**
