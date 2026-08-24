@@ -19,6 +19,13 @@ class RoomMap:
     def __init__(self):
         self._floor: set[tuple[int, int]] = set()
         self._walls: set[tuple[int, int]] = set()
+        # Crossed doorways: impassable for exploration AND immune to mark_floor.
+        # A plain wall (`_walls`) is cleared the moment the player stands on it
+        # (mark_floor discards it) and cannot be re-set over floor - so a re-entry
+        # onto a doorway silently reopens it, and nearest_frontier sends the agent
+        # straight back out through that one tile (the outdoor edge oscillation).
+        # Doorways live here instead, where standing on them can't reopen them.
+        self._doors: set[tuple[int, int]] = set()
 
     def mark_floor(self, tile: tuple[int, int]) -> None:
         self._floor.add(tuple(tile))
@@ -32,6 +39,15 @@ class RoomMap:
         tile = tuple(tile)
         if tile not in self._floor:
             self._walls.add(tile)
+
+    def mark_door(self, tile: tuple[int, int]) -> None:
+        """Fence off a crossed doorway durably. Unlike `mark_wall`, this survives
+        the player later standing on the tile (mark_floor never clears `_doors`),
+        so exploration cannot re-route back out through an exit it already found -
+        which is what makes the agent ping-pong on a single tile at an outdoor
+        screen edge, where the reverse crossing reliably drops it back on the
+        doorway. Deliberate room changes use go_to, which ignores this map."""
+        self._doors.add(tuple(tile))
 
     def observe(self, from_tile, to_tile, direction: str, moved: int) -> None:
         """Record one move's outcome. moved == 0 => the neighbour in `direction`
@@ -70,7 +86,7 @@ class RoomMap:
                   for n in [(start[0] + dx, start[1] + dy)])
         while q:
             tile, first_dir = q.popleft()
-            if tile in self._walls:
+            if tile in self._walls or tile in self._doors:
                 continue
             if tile not in self._floor:      # unknown tile reached -> frontier
                 return first_dir
@@ -88,7 +104,7 @@ class RoomMap:
         for tile in self._floor:
             for dx, dy in _DELTA.values():
                 n = (tile[0] + dx, tile[1] + dy)
-                if n not in self._floor and n not in self._walls:
+                if n not in self._floor and n not in self._walls and n not in self._doors:
                     return True
         return False
 

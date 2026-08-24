@@ -512,3 +512,50 @@ That evolution is the point; the log is not rewritten to hide it. Dead-ends stay
   town. The odometry/match scaffolding was then deleted. **Lesson: the fingerprint
   was fine all along - the bug was in *when a crossing is recorded*, not in the
   *identity*. Reach for a deterministic reproduction before the next hypothesis.**
+- **Outdoor one-tile oscillation: a durable doorway fence.** New symptom watching a
+  run: outdoors the character ping-pongs A<->B on a *single* tile, the screen
+  flickering between two screens. Not issue #7 (those were same-fp self-loops); here
+  the two screens are genuinely different and both crossings are "real". User's game
+  knowledge pinned the physics: outdoor transitions are a **hard cut** and you spawn
+  on the **edge** of the new screen. Root cause, from the code: `explore` fences a
+  discovered doorway with `RoomMap.mark_wall`, but that fence is **erasable** -
+  `mark_floor` discards a wall the instant the player stands on the tile, and
+  `mark_wall` refuses to re-fence a floor tile. Indoors this never bit because the
+  reverse crossing is unreliable (issue #1) - the auto-return in `skill_explore`
+  fails and the pass ends. Outdoors the hard-cut return is **reliable**, so the
+  player lands back on the doorway, `mark_floor` reopens it, and `nearest_frontier`
+  sends it straight back out - forever, bounded only by the explore budget (a fast
+  visible flicker). Fix: a durable `RoomMap._doors` set that `mark_floor` never
+  clears and `nearest_frontier`/`has_unexplored` treat as impassable; `skill_explore`
+  now `mark_door`s both the discovered doorway and the outward tile of wherever it
+  actually re-enters. Guarded by an extended `tests/test_roommap.py` (a door survives
+  `mark_floor`; the contrast case shows a plain wall does not); the ROM explore/town
+  tests stay green. Honest note surfaced by this fix: the oscillation was *partly
+  load-bearing* - it was how `explore` used to stumble into the next room - so
+  forward progress now depends on the LLM choosing `go_to` (which is correct: leaving
+  a room is a judgement call).
+- **Groq model decommissioned: `llama-3.1-8b-instant` -> `gpt-oss-20b`.** A
+  diagnostic run showed **every** LLM call failing with `404 Not Found`; the loop
+  degraded to permanent `explore` fallback (`why='fallback'`), which by itself looks
+  like "stuck in room 1". `GET {base_url}/models` confirmed the configured model is
+  no longer served (the live chat models are `openai/gpt-oss-20b`, `openai/gpt-oss-120b`,
+  `qwen/qwen3.6-27b`). Switched `.env`/`.env.example` to **`openai/gpt-oss-20b`** -
+  the proven cost/quality default here (it drove the clean 24-round issue-#7 run);
+  120b is stronger but rate-limits harder on the free tier. Takeaway: a dead cloud
+  model is indistinguishable from an agent bug in the logs - check `/models` first.
+- **Prompt loosening: let the LLM leave a room before it is 100% mapped.** With a
+  live model, the LLM's judgement was actually good - it read a room, then chose
+  `go_to` the next one - but it got trapped: `INTENT_SYSTEM` rule 4 gated leaving on
+  the room being **"fully explored"**, and `explore` can never declare the living
+  room fully mapped (unreachable frontier behind furniture / the mother-scene area),
+  so the model dutifully explored forever and never reached rule 4. That is the
+  *opposite* of "the LLM decides". Fix (state clarity, not model size, the recurring
+  theme): reworded rules 3/4 so that **once the landmarks here are read, a known exit
+  into a not-yet-visited room is a valid `go_to`** - a room never has to be fully
+  mapped first; and `build_state` now annotates each exit with `(NOT visited yet)` so
+  the option is visible. Verified over Groq (gpt-oss-20b): the agent reads s0, `go_to
+  s1`, reads it, then **`go_to s2` on its own** to chase the "find the girl next door
+  / flowers" plan - the living-room stall is gone. New frontier it exposed: crossing
+  *out of* the deeper outdoor screens (`s3`) still fails intermittently (`go_to ...
+  didn't cross`), and the model sometimes targets the room it is already in - the
+  next thing to look at.

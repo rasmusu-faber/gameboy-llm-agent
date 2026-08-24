@@ -58,9 +58,12 @@ INTENT_SYSTEM = (
     "1. If there are UNREAD landmarks here, interact with one - reading and talking "
     "is how you find clues (an object you've already read gives nothing new).\n"
     "2. If your plan names a place or person to reach, go_to it and act on it.\n"
-    "3. Otherwise, if this room still has unexplored area, explore it.\n"
-    "4. If this room is fully explored AND its landmarks are read, go_to a "
-    "PARTIALLY-explored or NOT-visited room (prefer a connected exit).\n"
+    "3. Once the landmarks here are read, you do NOT need to finish mapping this "
+    "room: if a known exit leads to a room you have NOT visited yet, you may go_to "
+    "it to pursue your goal. A room never has to be 100% explored before you move "
+    "on - moving toward the goal beats mapping the last corner.\n"
+    "4. Otherwise, if this room still has unexplored area and nothing better calls, "
+    "explore it.\n"
     "Do NOT explore room after room while unread landmarks or an unmet plan remain. "
     "You are told the current day and how many days remain; time is limited, so "
     "weigh it toward the goal.\n"
@@ -154,7 +157,7 @@ def skill_explore(pyboy, world, rooms, probed, cur_fp):
     for d, _tid, door in world.exits_detailed(cur_fp):   # fence off known doorways
         if door:
             dx, dy = _DELTA[d]
-            room.mark_wall((door[0] + dx, door[1] + dy))
+            room.mark_door((door[0] + dx, door[1] + dy))
     found = []
     for _ in range(EXPLORE_BUDGET):
         if dialog_open(pyboy):            # a probe may have opened one (e.g. a save
@@ -182,12 +185,19 @@ def skill_explore(pyboy, world, rooms, probed, cur_fp):
                 if heard:
                     world.add_fact(new_fp, heard)         # entry dialogue -> hints
                 dx, dy = _DELTA[frontier]
-                room.mark_wall((ptile[0] + dx, ptile[1] + dy))  # fence this doorway
+                room.mark_door((ptile[0] + dx, ptile[1] + dy))  # fence this doorway
                 _, back_fp = skill_go_to(pyboy, world, new_fp, world.scene_id(cur_fp))
                 if back_fp != cur_fp:                     # couldn't return -> accept it
                     note = f" (scene: {heard[:24]!r})" if heard else ""
                     return (f"explored; found exit to {nid} but stayed there"
                             f"{_join(found)}{note}"), back_fp
+                # Durably fence the way back OUT from where we actually re-entered:
+                # the reverse crossing drops us on (or beside) the doorway, and
+                # without this the frontier walks straight back through that one
+                # tile - the outdoor A<->B oscillation. mark_door survives the
+                # mark_floor that the next iteration runs on this tile.
+                rt = player_tile(pyboy)
+                room.mark_door((rt[0] + dx, rt[1] + dy))
                 found.append(f"exit->{nid}")
                 continue
             # else: a SCROLLING screen ticked the fingerprint while the player walked
@@ -374,7 +384,14 @@ def build_state(world, rooms, cur_fp, pyboy, log, subgoal, read=None):
     label = world.label_of(cur_fp)
     room_name = cur_id + (f" ({label})" if label else "")
     exits = world.exits_detailed(cur_fp)
-    exits_str = "; ".join(f"{d} -> {tid}" for d, tid, _ in exits) or "none known yet"
+    # Annotate each exit with whether its target room has been visited this run, so
+    # the LLM can see - and choose - a known exit into unexplored territory instead
+    # of endlessly mapping the current room (rule 3). Visited == has a live RoomMap.
+    visited_keys = {fp_key(fp) for fp in rooms}
+    key_of_id = {s["id"]: s["key"] for s in world.scene_list()}
+    _unvisited = lambda tid: "" if key_of_id.get(tid) in visited_keys else " (NOT visited yet)"
+    exits_str = "; ".join(f"{d} -> {tid}{_unvisited(tid)}" for d, tid, _ in exits) \
+        or "none known yet"
     lms = world.landmarks_of(cur_fp)
     lm_str = "; ".join(f'{lm["id"]} @ {lm["tile"]}: "{lm["text"]}"'
                        for lm in lms) or "none yet"
