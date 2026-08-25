@@ -20,7 +20,7 @@ from perception import (
 import navigation
 from navigation import (
     press, walk_direction, walk_to, interact, dismiss_dialog, read_dialog,
-    advance_cutscene, sweep_for_crossing, TILE,
+    advance_cutscene, sweep_for_crossing, probe_for_crossing, TILE,
 )
 from memory import WorldMap, fp_key
 from roommap import RoomMap
@@ -246,6 +246,8 @@ def skill_go_to(pyboy, world, cur_fp, target):
         target = match[0]
 
     cur_id = world.scene_id(cur_fp)
+    if target == cur_id:                        # already here - don't sweep our own room
+        return f"go_to: already in {cur_id}; pick a DIFFERENT room or a landmark here", cur_fp
     lm = world.find_landmark(target)
     if lm:
         if lm["scene"] != cur_id:
@@ -255,6 +257,7 @@ def skill_go_to(pyboy, world, cur_fp, target):
         ok = walk_to(pyboy, tx * TILE, ty * TILE)
         return (f"go_to: reached {target}" if ok
                 else f"go_to: stopped next to {target}"), cur_fp
+    target_key = next((s["key"] for s in world.scene_list() if s["id"] == target), None)
     for d, tid, door in world.exits_detailed(cur_fp):
         if tid == target:
             if door and door != (0, 0):         # walk onto the doorway tile
@@ -264,22 +267,33 @@ def skill_go_to(pyboy, world, cur_fp, target):
                 if scene_fingerprint(pyboy) != cur_fp:
                     advance_cutscene(pyboy)     # play any entry scene until movable
                     new_fp = scene_fingerprint(pyboy)
-                    if new_fp != cur_fp:        # a real crossing lands on another screen
+                    if fp_key(new_fp) == target_key:   # landed on the TARGET screen
                         world.seen_scene(new_fp, player_position(pyboy))
                         return f"go_to: crossed into {target}", new_fp
+                    if new_fp != cur_fp:        # crossed, but NOT to the target: the
+                        break                   # recorded edge is mis-guessed (e.g. a
+                    # falls exit tagged 'up' that really leads elsewhere) - stop
+                    # trusting it and hand off to the self-correcting sweep below.
             # The recorded edge is stale: a room's spawn tile and the geometric
             # opposite of the entry direction are both unreliable in Deadeus, so a
-            # reverse edge guessed by note_crossing often doesn't cross. Fall back
-            # to a real sweep and learn the true door from the crossing.
+            # reverse edge guessed by note_crossing often doesn't cross (or crosses to
+            # the wrong screen). Fall back to a real sweep and learn the true door.
             return _cross_by_sweep(pyboy, world, cur_fp, target)
     return f"go_to: '{target}' isn't a known landmark or connected room", cur_fp
 
 
 def _cross_by_sweep(pyboy, world, cur_fp, target):
-    """Recover a failed edge crossing by deterministically sweeping for the door,
-    then record the REAL edge (direction + door tile) we observed - self-correcting
-    the map. Returns (message, new_fp). If nothing crossed, stays put."""
-    real_dir, door_tile = sweep_for_crossing(pyboy, cur_fp)
+    """Recover a failed edge crossing by finding a REAL door and recording the true
+    edge (direction + door tile) we observed - self-correcting the map. Returns
+    (message, new_fp). If nothing crossed, stays put.
+
+    Tries a cheap in-place directional probe first (robust on open outdoor screens,
+    issue #10) and only falls back to the wider corner-sweep when no door is within
+    a step or two - the sweep can walk off an unrelated exit on a multi-exit screen,
+    so it is the fallback, not the first resort."""
+    real_dir, door_tile = probe_for_crossing(pyboy, cur_fp)
+    if real_dir is None:
+        real_dir, door_tile = sweep_for_crossing(pyboy, cur_fp)
     if real_dir is None:
         return f"go_to: tried to reach {target} but didn't cross", cur_fp
     advance_cutscene(pyboy)                      # play any entry scene until movable

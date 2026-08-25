@@ -559,3 +559,49 @@ That evolution is the point; the log is not rewritten to hide it. Dead-ends stay
   *out of* the deeper outdoor screens (`s3`) still fails intermittently (`go_to ...
   didn't cross`), and the model sometimes targets the room it is already in - the
   next thing to look at.
+
+## Issue #10: crossing out of open outdoor screens (Urizen Falls)
+
+- **Symptom.** With a live model the agent reached the town's left-hand outdoor
+  screen (Urizen Falls) but then `go_to <town>` kept logging "tried to reach ... but
+  didn't cross", and the planner sometimes targeted the room it was already in.
+- **Method (the issue-#7 lesson, done right).** Instead of theorising, built a
+  **deterministic savestate fixture**: a throwaway `scratchpad/play.py` lets the user
+  hand-walk the game (native PyBoy keys) and auto-saves one savestate per screen; the
+  user walked town->left into the falls (fp `dea6a062ec3ae7ea`). A **raw single-press
+  probe** from the loaded entry tile (18,17) then measured each direction with zero
+  skill machinery in the way.
+- **Ground truth (matches the user's game knowledge).** The falls is an OPEN screen:
+  `up` and `down` are walls; `left` walks deeper into the forest; `right` teleports
+  back to the town (`78e83e32b063d8cf`) at (2,17). It does **not** scroll, and standing
+  still does **not** change the fp (animation is sprites/palette, not bg tiles - the old
+  belief re-confirmed). An apparent phantom third screen ("s4"/`7ed6...`) seen earlier
+  was **not real**: `advance_cutscene`/`_is_movable` prove mobility by pressing
+  right-then-left, and at a screen edge that press crosses the boundary and reads a
+  mid-transition fingerprint. Chasing "scrolling"/"animation" fp instability was a
+  dead-end; the fp was fine.
+- **Two real bugs.** (a) The recorded reverse edge was a wrong `note_crossing` guess
+  (`falls--up-->town`, the geometric opposite of a `down` entry) - but the true way back
+  is `right`, so `go_to` pressed a wall. (b) The `_cross_by_sweep` fallback's corner-seek
+  **walked off an unrelated exit** while positioning on this multi-exit open screen, so
+  it never surveyed the right edge. On top of that, `skill_go_to`'s fast path accepted
+  *any* fingerprint change as success and so **falsely reported** "crossed into town"
+  after stepping onto a different screen.
+- **Fix.** (1) Fast path accepts a crossing only when the landed fp IS the target's
+  (`fp_key(new_fp) == target_key`); otherwise it hands off to the sweep. (2) New
+  `navigation.probe_for_crossing`: from the current tile, press each direction a step
+  or two, accept only a real teleport (`is_crossing_move`), and **undo** non-crossing
+  walks so the probe stays in place - it TRIES each way rather than assuming the reverse
+  is the opposite (irregular in Deadeus, esp. indoors, per the user). `_cross_by_sweep`
+  runs this cheap probe before the corner-sweep, which is now the fallback for a door
+  that is several tiles along an edge. (3) `sweep_for_crossing` also gates on
+  `is_crossing_move`. (4) A self-target guard: `go_to <the room you're in>` returns
+  early. Guarded by `tests/test_leave_falls.py` (savestate fixture: both the correct
+  `right` edge via the fast path and the wrong `up` guess via probe-recovery reach the
+  town). All prior ROM + no-ROM tests stay green, including the indoor
+  `test_reverse_crossing`.
+- **Process note.** Early in this session I over-ran throwaway probe scripts and
+  narrated speculative "scrolling" theories; the user (rightly) pulled me back to small,
+  verified steps and to **asking his game knowledge first**. The savestate + raw-press
+  measurement, cross-checked against what he knows about the falls, is what actually
+  closed it.

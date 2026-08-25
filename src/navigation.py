@@ -10,6 +10,7 @@ from perception import (
     player_position, scene_fingerprint, visible_dialog_text, dialog_open,
 )
 from dialog import merge_dialog
+from crossing import is_crossing_move
 
 TILE = 8
 
@@ -71,7 +72,7 @@ def walk_direction(pyboy, direction, max_tiles=12) -> int:
 
 def sweep_for_crossing(pyboy, ref_fp, sweep_len=16, push=4):
     """Deterministically hunt for a door: sweep each room edge, pushing outward,
-    until the scene fingerprint changes (= we crossed into a new scene).
+    until the player TELEPORTS to a new scene (= a real crossing).
 
     A reflex, not a judgement call - the LLM chooses to invoke it, this code does
     the systematic sweep (small models can't). `ref_fp` is the current scene's
@@ -82,18 +83,67 @@ def sweep_for_crossing(pyboy, ref_fp, sweep_len=16, push=4):
     and the geometric opposite of the entry direction are both unreliable in
     Deadeus (a door can be one tile off the spawn, and the way back is not always
     the reverse direction), so edges are best learned from an actual crossing.
+
+    A crossing is a POSITION teleport (`is_crossing_move`), not merely a changed
+    fingerprint: on a scrolling outdoor screen (e.g. Urizen Falls / s3) pushing at
+    an edge scrolls the background - the fingerprint changes on every step while the
+    player just walks one tile. Gating on the bare fp change (issue #10) made the
+    sweep stop at the first scroll edge and never reach the edge with the real exit,
+    so `go_to` reported "didn't cross". Same discriminator as issue #7's town fix:
+    a scroll-tick lands exactly one tile along the press; a crossing jumps.
     """
     for corner, push_dir, sweep_dir in _EDGES:
         for m in corner:                      # go to this edge's corner
             walk_direction(pyboy, m, max_tiles=20)
         for _ in range(sweep_len):
             for _ in range(push):             # push outward at this column/row
-                x, y = player_position(pyboy)
+                prev = player_position(pyboy)
                 press(pyboy, push_dir)
                 if scene_fingerprint(pyboy) != ref_fp:
-                    return push_dir, (x // TILE, y // TILE)
+                    now = player_position(pyboy)
+                    if is_crossing_move(prev, now, push_dir):
+                        return push_dir, (prev[0] // TILE, prev[1] // TILE)
+                    break                     # a scroll-tick, not an exit: this is a
+                    # scrolling edge - stop pushing into it and move along the sweep
             if walk_direction(pyboy, sweep_dir, max_tiles=1) == 0:
                 break                         # reached the far corner of this edge
+    return None, None
+
+
+_OPPOSITE = {"up": "down", "down": "up", "left": "right", "right": "left"}
+
+
+def probe_for_crossing(pyboy, ref_fp, reach=4):
+    """Try each direction from the CURRENT position, stepping up to `reach` tiles to
+    walk through a nearby door. Returns `(dir, door_tile)` of the first REAL crossing
+    (a teleport, per `is_crossing_move`) or `(None, None)`.
+
+    Unlike `sweep_for_crossing`, this never walks off to a screen corner first, so it
+    can't fall out of an unrelated exit on an open outdoor screen (issue #10, e.g.
+    Urizen Falls, where seeking the top corner walked the sweep out the side exit).
+    Continuous (non-crossing) walking is UNDONE so the probe leaves the player where
+    it started - ideal for returning through the door you just entered. We TRY each
+    direction instead of assuming the reverse is the opposite: in Deadeus the way back
+    is irregular (indoors especially), so only an observed crossing is trusted.
+    """
+    for d in ("right", "left", "up", "down"):
+        walked = 0
+        hit = None
+        for _ in range(reach):
+            prev = player_position(pyboy)
+            press(pyboy, d)
+            now = player_position(pyboy)
+            if scene_fingerprint(pyboy) != ref_fp:
+                if is_crossing_move(prev, now, d):     # a real teleport = a crossing
+                    hit = (d, (prev[0] // TILE, prev[1] // TILE))
+                break                                   # crossed (or a scroll/anim tick): stop
+            if now == prev:
+                break                                   # blocked by a wall
+            walked += 1
+        if hit:
+            return hit
+        for _ in range(walked):                         # undo the walk, stay in place
+            press(pyboy, _OPPOSITE[d])
     return None, None
 
 
