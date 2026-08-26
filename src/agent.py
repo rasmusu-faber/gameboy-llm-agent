@@ -231,11 +231,14 @@ def explore_to_completion(pyboy, world, rooms, probed, cur_fp):
 
 
 def skill_go_to(pyboy, world, cur_fp, target):
-    """Walk to a known landmark (same room) or cross to a connected room.
+    """Walk to a known landmark or reach a room, routing across several rooms if need be.
 
     `target` may be a landmark id (l#), a room id (s#), or a bare exit direction
     (up/down/left/right) - the LLM tends to name the direction, so resolve it to
-    the room that exit leads to.
+    the room that exit leads to. A room (or a landmark's room) that is not a direct
+    neighbour is reached by a BFS route (`WorldMap.route`) walked one hop at a time
+    (`_follow_route`); a direct neighbour crosses in one hop (`_cross_to_neighbor`).
+    Only known/observed edges are used, so an unexplored target reports honestly.
     """
     if not target:
         return "go_to needs a target (a landmark l#, a room s#, or a direction)", cur_fp
@@ -248,15 +251,30 @@ def skill_go_to(pyboy, world, cur_fp, target):
     cur_id = world.scene_id(cur_fp)
     if target == cur_id:                        # already here - don't sweep our own room
         return f"go_to: already in {cur_id}; pick a DIFFERENT room or a landmark here", cur_fp
+
     lm = world.find_landmark(target)
     if lm:
-        if lm["scene"] != cur_id:
-            return (f"go_to: {target} is in {lm['scene']}, not here; "
-                    "cross-room routing isn't built yet"), cur_fp
+        if lm["scene"] != cur_id:               # landmark in another room: route there first
+            msg, cur_fp = _follow_route(pyboy, world, cur_fp, lm["scene"])
+            if world.scene_id(cur_fp) != lm["scene"]:
+                return msg, cur_fp              # stalled en route - report where we stopped
         tx, ty = lm["tile"]
         ok = walk_to(pyboy, tx * TILE, ty * TILE)
         return (f"go_to: reached {target}" if ok
                 else f"go_to: stopped next to {target}"), cur_fp
+
+    if target not in {s["id"] for s in world.scene_list()}:
+        return f"go_to: '{target}' isn't a known landmark or connected room", cur_fp
+    # a known room: cross directly if it neighbours us, else route across rooms (BFS)
+    if any(tid == target for _d, tid, _door in world.exits_detailed(cur_fp)):
+        return _cross_to_neighbor(pyboy, world, cur_fp, target)
+    return _follow_route(pyboy, world, cur_fp, target)
+
+
+def _cross_to_neighbor(pyboy, world, cur_fp, target):
+    """Cross into a DIRECTLY connected room `target`: try the recorded door (accepting
+    the crossing only when the landed fp IS the target's), then hand off to a
+    self-correcting sweep. Returns (message, new_fp)."""
     target_key = next((s["key"] for s in world.scene_list() if s["id"] == target), None)
     for d, tid, door in world.exits_detailed(cur_fp):
         if tid == target:
@@ -279,7 +297,24 @@ def skill_go_to(pyboy, world, cur_fp, target):
             # reverse edge guessed by note_crossing often doesn't cross (or crosses to
             # the wrong screen). Fall back to a real sweep and learn the true door.
             return _cross_by_sweep(pyboy, world, cur_fp, target)
-    return f"go_to: '{target}' isn't a known landmark or connected room", cur_fp
+    return f"go_to: '{target}' isn't a connected room", cur_fp
+
+
+def _follow_route(pyboy, world, cur_fp, target_room):
+    """Walk a multi-room BFS route to `target_room`, one hop at a time, verifying each
+    landing by fingerprint. Stops honestly if a hop fails so the LLM can re-plan -
+    never presses blindly onward. Returns (message, new_fp)."""
+    hops = world.route(cur_fp, target_room)
+    if hops is None:
+        return f"go_to: no known route to {target_room} yet - explore more", cur_fp
+    if not hops:                                # already in the target room
+        return f"go_to: already in {target_room}", cur_fp
+    for _direction, next_id in hops:
+        _msg, cur_fp = _cross_to_neighbor(pyboy, world, cur_fp, next_id)
+        if world.scene_id(cur_fp) != next_id:   # a hop didn't land where planned
+            return (f"go_to: route to {target_room} stalled at "
+                    f"{world.scene_id(cur_fp)} (wanted {next_id})"), cur_fp
+    return f"go_to: routed to {target_room}", cur_fp
 
 
 def _cross_by_sweep(pyboy, world, cur_fp, target):

@@ -16,6 +16,7 @@ sub-second responses while testing, or at a stronger model for real runs.
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -62,6 +63,58 @@ def _wait(seconds: float) -> None:
     (WAIT_HOOK or time.sleep)(seconds)
 
 
+# --- proactive token pacing (stay under the provider's tokens-per-minute cap) ----
+# Reasoning quality is the point of this project, so we DON'T shrink the prompt or
+# the model's thinking to fit the free-tier 8000 tokens/min. Instead we read Groq's
+# per-response rate headers and, when the remaining token budget dips below a safe
+# margin, wait for it to refill BEFORE the next call - turning "fast but 429-throttled
+# with occasional skipped rounds" into "deliberately slow but reliable, full reasoning".
+TOKEN_MARGIN = 2500            # start pacing once fewer than this many tokens remain
+ROUND_EST = 1500              # rough tokens one intent round costs (input + reasoning)
+_pace = {"remaining": None, "reset": 0.0, "limit": None}   # last seen token budget
+
+
+def _parse_duration(s: str) -> float:
+    """Groq reset headers look like '547ms', '1.5s', '1m26.4s' -> seconds."""
+    total, s = 0.0, (s or "").strip()
+    for val, unit in re.findall(r"([\d.]+)(ms|m|s)", s):
+        f = float(val)
+        total += f / 1000 if unit == "ms" else (f * 60 if unit == "m" else f)
+    return total
+
+
+def _update_pace(headers) -> None:
+    for src, key in (("x-ratelimit-remaining-tokens", "remaining"),
+                     ("x-ratelimit-limit-tokens", "limit")):
+        val = headers.get(src)
+        if val is not None:
+            try:
+                _pace[key] = int(val)
+            except (TypeError, ValueError):
+                pass
+    reset = headers.get("x-ratelimit-reset-tokens")
+    if reset is not None:
+        _pace["reset"] = _parse_duration(reset)
+
+
+def _pace_before_call() -> None:
+    """If the last response left us below the token margin, wait just long enough for
+    the token bucket to refill headroom for one more round, so the next request doesn't
+    429. Short, even pauses (refill rate = limit/60 per second) rather than rare long
+    stalls - deliberately slow but reliable, with full reasoning intact."""
+    rem = _pace.get("remaining")
+    if rem is None or rem >= TOKEN_MARGIN:
+        return
+    limit = _pace.get("limit") or 8000
+    refill_per_s = limit / 60.0                  # Groq token buckets refill continuously
+    target = TOKEN_MARGIN + ROUND_EST            # enough for a comfortable next round
+    wait = min(max((target - rem) / refill_per_s, 0.0), RETRY_CAP)
+    if wait > 0:
+        print(f"  [llm] pacing: {rem} tokens/min left, waiting {wait:.1f}s for refill")
+        _wait(wait)
+        _pace["remaining"] = min(target, limit)  # optimistic; real value re-read next call
+
+
 def _retry_after(resp, fallback: float) -> float:
     """Seconds to wait per the server's Retry-After header (Groq sends one on a
     429), capped; fall back to a caller-supplied backoff if it's missing/unparsable."""
@@ -76,10 +129,12 @@ def chat_json(system: str, user: str, timeout: float = 120.0) -> dict:
     """Send a system+user prompt, expect a JSON object, return it parsed.
 
     Returns {} if the model didn't produce valid JSON, so callers can validate
-    without try/except at every site. On a 429 (rate limit) it retries with a
-    Retry-After-honoring backoff - which both keeps the LLM in the loop and
-    naturally paces rapid runs under the provider's per-minute cap - only degrading
-    to {} (the explore fallback) once retries are exhausted.
+    without try/except at every site. Rate limits are handled two ways: PROACTIVE
+    token pacing (`_pace_before_call`, from the per-response rate headers) keeps runs
+    under the provider's tokens-per-minute cap so a 429 rarely happens at all -
+    preserving full reasoning rather than shrinking the prompt; a Retry-After-honoring
+    backoff still catches any 429 that slips through, only degrading to {} (the explore
+    fallback) once retries are exhausted.
     """
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user}]
@@ -125,6 +180,7 @@ def _openai(messages, timeout):
         raise RuntimeError(
             "LLM_BACKEND=openai needs OPENAI_BASE_URL, OPENAI_API_KEY and "
             "OPENAI_MODEL - set them in .env (never in code).")
+    _pace_before_call()                          # wait if the token budget is low
     resp = httpx.post(
         f"{OPENAI_BASE_URL}/chat/completions",
         headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
@@ -133,5 +189,6 @@ def _openai(messages, timeout):
               "response_format": {"type": "json_object"}},
         timeout=timeout,
     )
+    _update_pace(resp.headers)                    # remember the budget (set even on 429)
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"]

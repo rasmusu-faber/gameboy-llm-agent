@@ -28,6 +28,7 @@ can rewrite it idempotently without disturbing any other section.
 """
 
 import re
+from collections import deque
 from pathlib import Path
 
 MAP_START = "<!-- MAP:START -->"
@@ -125,6 +126,42 @@ class WorldMap:
     def door_tile(self, from_fp: int, direction: str, to_fp: int):
         """The tile in `from_fp` that this exit was crossed from, or None."""
         return self._edges.get((fp_key(from_fp), direction, fp_key(to_fp)))
+
+    def route(self, from_fp: int, to_id: str):
+        """Shortest hop sequence from scene `from_fp` to the scene whose id is
+        `to_id`, over known edges (breadth-first = fewest rooms).
+
+        Returns a list of ``(direction, target_id)`` hops to follow in order, ``[]``
+        if already there, or ``None`` if the target is unknown or unreachable in the
+        known map. Pure graph search over measured edges - no emulator, no judgement:
+        the agent loop feeds each hop to the one-room crossing skill. Only edges the
+        agent actually observed are traversed (directed; Deadeus reverses are
+        irregular), so a route is never invented for an unexplored path.
+        """
+        start = fp_key(from_fp)
+        key_of = {s["id"]: k for k, s in self._scenes.items()}   # id -> fingerprint key
+        if to_id not in key_of or start not in self._scenes:
+            return None
+        goal = key_of[to_id]
+        if start == goal:
+            return []
+
+        adj: dict[str, list[tuple[str, str]]] = {}               # key -> [(dir, nb_key)]
+        for (a, d, b) in self._edges:
+            adj.setdefault(a, []).append((d, b))
+
+        seen, q = {start}, deque([(start, [])])
+        while q:
+            node, path = q.popleft()
+            for d, nb in sorted(adj.get(node, [])):              # sorted = deterministic
+                if nb in seen:
+                    continue
+                hop = path + [(d, self._scenes[nb]["id"])]
+                if nb == goal:
+                    return hop
+                seen.add(nb)
+                q.append((nb, hop))
+        return None
 
     def connect(self, from_fp: int, direction: str, to_fp: int, door_tile=None) -> None:
         """Record a directed transition from_scene --direction--> to_scene.

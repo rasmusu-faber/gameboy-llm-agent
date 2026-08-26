@@ -605,3 +605,50 @@ That evolution is the point; the log is not rewritten to hide it. Dead-ends stay
   verified steps and to **asking his game knowledge first**. The savestate + raw-press
   measurement, cross-checked against what he knows about the falls, is what actually
   closed it.
+
+## Cross-room routing for go_to (BFS)
+
+- **Why.** `go_to` could only reach a landmark in the current room or a *directly
+  connected* neighbour; a landmark/room several hops away hit a hard "cross-room
+  routing isn't built yet". That capped the agent at hand-over-hand wandering - no
+  way to say "go to the neighbour girl's house" and have it navigate there.
+- **Design (planner/controller split, again).** The route is a **pure graph search**,
+  kept out of the emulator: `WorldMap.route(from_fp, to_id)` runs BFS over the
+  measured directed edges and returns the shortest `[(direction, target_id), ...]`
+  hop list (`[]` if already there, `None` if unknown/unreachable). Unit-tested with
+  fake fingerprints, no ROM (`tests/test_route.py`): multi-hop order, shortest-path
+  wins, directed (no invented reverse), unknown start/target.
+- **Execution.** `skill_go_to` now: same-room landmark -> walk; a room or another
+  room's landmark that is a direct neighbour -> `_cross_to_neighbor` (the extracted
+  one-hop crossing, unchanged - fast door path with the target-fp guard, then the
+  self-correcting probe/sweep from issue #10); anything farther -> `_follow_route`,
+  which walks the BFS hops **one at a time and verifies each landing by fingerprint**,
+  stopping honestly (`route ... stalled at sX`) if a hop fails so the LLM re-plans -
+  never pressing blindly onward.
+- **Deliberately only routes what was explored.** BFS traverses observed edges only,
+  so a not-yet-discovered destination reports "no known route ... explore more" rather
+  than inventing a path - routing and exploration stay complementary, matching the
+  issue #1/#10 "never guess a crossing" rule.
+- **Verification.** `test_route` (pure) + all single-hop ROM tests unchanged and green
+  (`test_leave_falls`, `test_reverse_crossing`, `test_explore_reaches_town`,
+  `test_no_town_selfloops`, `test_skills`); the multi-hop loop composes the verified
+  one-hop crossing. A full multi-hop ROM integration drive is a good follow-up.
+
+## Proactive token pacing (staying under Groq's free-tier TPM)
+
+- **Measured the real limits** (headers from a 1-token request per model), not guessed:
+  every candidate model - `gpt-oss-20b/120b`, `qwen3.6-27b`, `qwen3.8-27b` - shares the
+  SAME free-tier cap of **8000 tokens/min** (requests are 1000/min, never the issue).
+  So a model swap does nothing for the 429s; `120b` is worse (same TPM, more tokens).
+  One intent round costs ~1048 input tokens + ~180 reasoning/output (measured) -> the
+  8000 TPM cap allows only ~6 rounds/min, which is why the 24-round run 429'd constantly.
+- **Chose pacing over shrinking reasoning.** The reasoning IS the project; `reasoning_effort=low`
+  cut output 181->36 tokens but trades away judgement quality, so we rejected it. Instead
+  `llm.py` reads the per-response rate headers (`x-ratelimit-remaining-tokens`/`-limit-tokens`/
+  `-reset-tokens`) and, once the remaining budget dips below `TOKEN_MARGIN`, waits just long
+  enough (refill rate = limit/60 per second) for headroom before the next call. Short even
+  pauses (~15-19s), not rare long stalls; the Retry-After backoff stays as a safety net.
+- **Result:** a 12-round live run showed pacing pauses and **zero 429s** (vs a 429 on nearly
+  every round before), with full reasoning intact - deliberately slow but reliable, no rounds
+  silently degraded to the explore fallback. Knobs: `TOKEN_MARGIN`, `ROUND_EST`. A paid Groq
+  Dev tier (~25x TPM) is the only way to also be *fast*.
