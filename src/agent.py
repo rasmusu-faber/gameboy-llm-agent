@@ -42,8 +42,9 @@ OUT = Path("runs/explore")
 WORLD = Path("memory/world.md")   # persistent notebook (git-ignored)
 
 INTENT_SYSTEM = (
-    "You are an agent exploring a Game Boy game (a small house). Each turn you "
-    "choose ONE high-level action; a deterministic skill then carries it out.\n"
+    "You are the boy from the intro, playing a Game Boy game (a small house and the "
+    "world outside). Each turn you choose ONE high-level action; a deterministic "
+    "skill then carries it out.\n"
     "Actions:\n"
     "- explore : map more of the CURRENT room (find its exits and objects). Use "
     "while the room is not fully explored.\n"
@@ -53,22 +54,28 @@ INTENT_SYSTEM = (
     "'Landmarks here'. Those ids live in the CURRENT room. To read something in "
     "another room, go_to that room FIRST - an id from another room will fail.\n"
     "- remember <note> : write down a short conclusion worth keeping.\n"
-    "Exploring only DISCOVERS ground; the POINT is to LEARN and ACT on your goal, "
-    "not to map the whole house. Each turn, prefer in THIS order:\n"
+    "Reading and exploring are only MEANS. The POINT is to pursue your goal: find out "
+    "how to prevent the entity's return WITHOUT harming anyone, and check on the "
+    "people who matter to you. Turn what you learn into ACTION - do not just map the "
+    "house.\n"
+    "Your 'subgoal' is your plan: keep it a concrete OBJECTIVE - a specific person or "
+    "place to reach, or a question to answer (e.g. 'check on the neighbour who came "
+    "looking for me', 'reach the place that sign pointed to', 'find how to repay the "
+    "debt') - NEVER a mechanical means like 'read books' or 'explore rooms'. When "
+    "dialogue names a person, place, or direction, update your subgoal to go there.\n"
+    "Each turn, prefer in THIS order:\n"
     "1. If there are UNREAD landmarks here, interact with one - reading and talking "
     "is how you find clues (an object you've already read gives nothing new).\n"
-    "2. If your plan names a place or person to reach, go_to it and act on it.\n"
-    "3. Once the landmarks here are read, you do NOT need to finish mapping this "
-    "room: if a known exit leads to a room you have NOT visited yet, you may go_to "
-    "it to pursue your goal. A room never has to be 100% explored before you move "
-    "on - moving toward the goal beats mapping the last corner.\n"
+    "2. Else, if your plan names a place or person to reach, go_to it (or a known "
+    "exit toward it) and act on it - a lead you've found beats wandering to read more.\n"
+    "3. Else, once the landmarks here are read, you do NOT need to finish mapping this "
+    "room: if a known exit leads to a room you have NOT visited yet, go_to it to "
+    "pursue your goal. A room never has to be 100% explored before you move on.\n"
     "4. Otherwise, if this room still has unexplored area and nothing better calls, "
     "explore it.\n"
-    "Do NOT explore room after room while unread landmarks or an unmet plan remain. "
-    "You are told the current day and how many days remain; time is limited, so "
-    "weigh it toward the goal.\n"
-    "Keep a running plan toward the goal in 'subgoal' and update it as you learn "
-    "(e.g. 'find and talk to my family', 'find out how to repay the debt'). "
+    "Do NOT re-read what you've already read, and do NOT wander room to room, while a "
+    "concrete lead or unmet plan remains. You are told the current day and how many "
+    "days remain; time is limited, so weigh it toward the goal.\n"
     "Use 'note' with the remember action to write down anything important.\n"
     'Respond ONLY as JSON: {"action":"explore|go_to|interact|remember",'
     '"target":"<id or empty>","note":"<for remember>",'
@@ -272,9 +279,9 @@ def skill_go_to(pyboy, world, cur_fp, target):
 
 
 def _cross_to_neighbor(pyboy, world, cur_fp, target):
-    """Cross into a DIRECTLY connected room `target`: try the recorded door (accepting
-    the crossing only when the landed fp IS the target's), then hand off to a
-    self-correcting sweep. Returns (message, new_fp)."""
+    """Cross into a DIRECTLY connected room `target`: walk to the recorded door and
+    step through, accepting the crossing only when the landed fp IS the target's, then
+    hand off to a self-correcting sweep. Returns (message, new_fp)."""
     target_key = next((s["key"] for s in world.scene_list() if s["id"] == target), None)
     for d, tid, door in world.exits_detailed(cur_fp):
         if tid == target:
@@ -288,14 +295,8 @@ def _cross_to_neighbor(pyboy, world, cur_fp, target):
                     if fp_key(new_fp) == target_key:   # landed on the TARGET screen
                         world.seen_scene(new_fp, player_position(pyboy))
                         return f"go_to: crossed into {target}", new_fp
-                    if new_fp != cur_fp:        # crossed, but NOT to the target: the
-                        break                   # recorded edge is mis-guessed (e.g. a
-                    # falls exit tagged 'up' that really leads elsewhere) - stop
-                    # trusting it and hand off to the self-correcting sweep below.
-            # The recorded edge is stale: a room's spawn tile and the geometric
-            # opposite of the entry direction are both unreliable in Deadeus, so a
-            # reverse edge guessed by note_crossing often doesn't cross (or crosses to
-            # the wrong screen). Fall back to a real sweep and learn the true door.
+                    if new_fp != cur_fp:        # crossed, but NOT to the target
+                        break
             return _cross_by_sweep(pyboy, world, cur_fp, target)
     return f"go_to: '{target}' isn't a connected room", cur_fp
 

@@ -652,3 +652,46 @@ That evolution is the point; the log is not rewritten to hide it. Dead-ends stay
   every round before), with full reasoning intact - deliberately slow but reliable, no rounds
   silently degraded to the explore fallback. Knobs: `TOKEN_MARGIN`, `ROUND_EST`. A paid Groq
   Dev tier (~25x TPM) is the only way to also be *fast*.
+
+## Concrete subgoals, not mechanical means
+
+- **Problem: the prompt let 'subgoal' collapse into a means, not an end.** The
+  original intent prompt asked the LLM to "keep a running plan toward the goal in
+  'subgoal'" without saying what a valid one looks like, so nothing stopped it
+  writing something mechanical like "read books" or "explore rooms" - a restated
+  action, not an objective. That's a plan that can never be satisfied or checked
+  off, so the priority list's "if your plan names a place or person, go_to it"
+  step had nothing concrete to act on.
+- **Fix: define a subgoal as an objective, with the ban made explicit.** `INTENT_SYSTEM`
+  now requires a subgoal to be a specific person/place to reach or a question to
+  answer (e.g. "check on the neighbour who came looking for me"), explicitly rules
+  out mechanical means, and instructs the LLM to update it the moment dialogue
+  names a person, place, or direction. This also folds in the same entity/debt
+  framing already used in the top-level `GOAL` string, so the two no longer pull
+  in different directions - subgoal is just `GOAL` made concrete for right now.
+- **Priority list reworded as if/elif/else.** Same four rules as before, but
+  chained with "Else" instead of independent sentences, so a 3B model reads them
+  as an ordered decision rather than four competing suggestions.
+- **`_cross_to_neighbor` docstring/comments trimmed to match.** The long inline
+  comment explaining why a recorded reverse edge can be stale (issue #7/#10) is
+  cut to one line - the reasoning already lives above in this log, so the code
+  comment no longer needs to re-explain it.
+- **Measured with a live 15-round run (Groq, `gpt-oss-20b`).** Mixed result, not a
+  clean win. For most of the run `subgoal` was still exactly the mechanical string
+  the prompt now explicitly bans - `'read l0'`, `'interact l16'`, `'explore s1'`,
+  `'go to s1'` - restating the action instead of naming an objective. The fix only
+  visibly kicked in once: round 12 overheard "Don't be too late coming home
+  tonight... she came knocking", and round 15's subgoal became `'check on the girl
+  next door'` with `why='dialogue mentions she came knocking and seems tr[oubled]'`
+  - a real person-and-reason objective, not a restated action.
+- **Reading: the instruction works, but only once there is something to anchor
+  to.** With no person/place in recent dialogue, the model falls back to the
+  mechanical pattern the prompt forbids rather than inventing a plausible
+  objective - which is arguably the *safer* failure mode (no hallucinated goal),
+  but it means the subgoal field is only trustworthy after a naming event, not
+  continuously. Early-game rounds (before any NPC dialogue) may need a distinct
+  bootstrap subgoal rather than relying on this instruction alone.
+- **Unrelated to this prompt change:** the run also hit the already-known outdoor/
+  town crossing collisions (`"tried to reach s2 but didn't cross"`,
+  `"aimed for s2, the open door led to s0"`) - expected, not a regression, see the
+  open issue #7 entries above.
