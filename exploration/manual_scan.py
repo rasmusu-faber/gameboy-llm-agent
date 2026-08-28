@@ -7,7 +7,7 @@ WRAM snapshots at different positions. Close the window when done; the log is
 written to runs/manual_scan.pkl for the scene-byte analysis.
 
 Run from the repo root:
-    conda run -n pokemon-agents python exploration/manual_scan.py
+    conda run -n gameboy-agents python exploration/manual_scan.py
 
 Default PyBoy keys: arrow keys = d-pad, A = key 'a', B = key 's',
 Start = Enter, Select = Backspace. (Tell me if yours differ.)

@@ -20,7 +20,7 @@ SCALE = 3  # 3x -> 480x432, comfortable to watch
 
 
 class Viewer:
-    def __init__(self, title="pokemon-llm-agent — live"):
+    def __init__(self, title="gameboy-llm-agent — live"):
         self.root = tk.Tk()
         self.root.title(title)
         self.root.resizable(False, False)

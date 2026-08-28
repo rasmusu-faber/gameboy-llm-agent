@@ -1,4 +1,4 @@
-# Design log — pokemon-llm-agent
+# Design log — gameboy-llm-agent
 
 A running log of the choices behind this project and why they were made, in
 **chronological order** — the earliest entries capture early thinking (Pokémon

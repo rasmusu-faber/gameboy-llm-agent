@@ -1,6 +1,6 @@
-# pokemon-llm-agent
+# gameboy-llm-agent
 
-![CI](https://github.com/rasmusfaber-ai/pokemon-llm-agent/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/rasmusu-faber/gameboy-llm-agent/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
 ![LLM](https://img.shields.io/badge/LLM-Ollama%20(local)-000000)
 ![Emulator](https://img.shields.io/badge/Emulator-PyBoy-5A9FD4)
@@ -13,12 +13,10 @@ This is a hands-on learning project about building LLM agents from scratch. The
 agent plays **Deadeus**, a free, open-source Game Boy horror game (a boy has three
 in-game days and eleven possible endings). It perceives the world model-free — RAM
 and the tilemap, no screenshots into a vision model — and a local LLM
-(`llama3.2:3b` via Ollama) makes the judgement calls.
-
-> **On the name.** It started as a Pokémon Red idea and pivoted to Deadeus, which
-> is legal to redistribute, so the whole project can be open-sourced. The RAM- and
-> tilemap-reading techniques are identical; Pokémon Red is an optional later
-> target. The repo name stayed for continuity.
+(`llama3.2:3b` via Ollama) makes the judgement calls. The project started as a
+Pokémon Red idea and pivoted to Deadeus, which is legal to redistribute, so the
+whole thing can be open-sourced — the same RAM- and tilemap-reading techniques
+apply to either game.
 
 ## The one idea worth taking away: reflexes vs. judgement
 
@@ -110,7 +108,7 @@ only read one file to understand the project, read that one.
 
 ```bash
 conda env create -f environment.yml
-conda activate pokemon-agents
+conda activate gameboy-agents
 ```
 
 Install [Ollama](https://ollama.com/) separately and pull the model:
@@ -132,7 +130,7 @@ python src/agent.py --watch  # with the live viewer
 ## Project layout
 
 ```
-pokemon-llm-agent/
+gameboy-llm-agent/
 ├── src/               # the application
 │   ├── perception.py    # the "eye": position + text from RAM/tilemap; scene fingerprint
 │   ├── navigation.py    # deterministic controller: walk_to / walk_direction / search_for_exit

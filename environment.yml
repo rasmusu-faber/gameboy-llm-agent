@@ -1,4 +1,4 @@
-name: pokemon-agents
+name: gameboy-agents
 channels:
   - conda-forge
 dependencies:
