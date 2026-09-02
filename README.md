@@ -2,21 +2,23 @@
 
 ![CI](https://github.com/rasmusu-faber/gameboy-llm-agent/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
-![LLM](https://img.shields.io/badge/LLM-Ollama%20(local)-000000)
+![LLM](https://img.shields.io/badge/LLM-swappable%20(Ollama%20%2F%20Groq)-000000)
 ![Emulator](https://img.shields.io/badge/Emulator-PyBoy-5A9FD4)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 
-**Can a small, *local* language model play a Game Boy game — with no vision model,
-seeing the world only by reading the emulator's memory?**
+**Can a small language model play a Game Boy game — with no vision model, seeing
+the world only by reading the emulator's memory?**
 
 This is a hands-on learning project about building LLM agents from scratch. The
 agent plays **Deadeus**, a free, open-source Game Boy horror game (a boy has three
 in-game days and eleven possible endings). It perceives the world model-free — RAM
-and the tilemap, no screenshots into a vision model — and a local LLM
-(`llama3.2:3b` via Ollama) makes the judgement calls. The project started as a
-Pokémon Red idea and pivoted to Deadeus, which is legal to redistribute, so the
-whole thing can be open-sourced — the same RAM- and tilemap-reading techniques
-apply to either game.
+and the tilemap, no screenshots into a vision model — and an LLM makes the
+judgement calls, through a swappable backend (local Ollama, or a cloud
+OpenAI-compatible endpoint — the reference setup uses Groq's free tier with
+`openai/gpt-oss-20b`, since a 3B local model is painfully slow per call). The
+project started as a Pokémon Red idea and pivoted to Deadeus, which is legal to
+redistribute, so the whole thing can be open-sourced — the same RAM- and
+tilemap-reading techniques apply to either game.
 
 ## The one idea worth taking away: reflexes vs. judgement
 
@@ -41,12 +43,25 @@ work.
 - **Reach the game on its own.** It clicks through Deadeus's long, partly
   unskippable intro by pressing A while a dialog is on screen, and confirms it has
   real control with a *reversible* movement test. (`skip_intro`)
-- **Navigate a room reliably — indoors.** Deterministic tile-by-tile movement,
-  plus a mini-map the agent builds from its own moves (floor where it has walked,
-  walls where a move was blocked) fed into the planner's prompt. Inside the house
-  this is solid, verified end-to-end; open-air navigation is not yet reliable (a
-  scene-fingerprint collision outdoors — see [Status](#status--what-works-what-doesnt)).
-  (`src/navigation.py`, `src/roommap.py`)
+- **Navigate a room reliably, indoors and outdoors.** Deterministic tile-by-tile
+  movement, plus a mini-map the agent builds from its own moves (floor where it has
+  walked, walls where a move was blocked) fed into the planner's prompt. Crossing
+  between screens — the hard part — is bound to the exact button-press that caused
+  it by a settle-based `step()` primitive, so a delayed screen transition can no
+  longer get misattributed to a later, unrelated press (this was the root cause
+  behind a family of self-loops and wrong-direction edges — see the design log).
+  (`src/navigation.py`, `src/roommap.py`, `src/crossing.py`)
+- **Know what day it is.** Reads the real in-game day counter straight from RAM and
+  surfaces "day N of 3" to the planner, so the LLM can reason about its shrinking
+  time budget — nothing prescribes *whether* to act on it; that's left to the LLM
+  to self-regulate.
+- **Never make an irreversible choice by accident.** Yes/No prompts (sleeping) and
+  the save book's Save/Cancel prompt are both auto-declined, so the agent can bump
+  into a bed or a save point while exploring without ending the day or overwriting
+  a save.
+- **Route across more than one room.** `go_to` does a BFS over the map graph, so
+  the LLM can name a destination two or three rooms away and the agent finds its
+  own way there.
 - **Remember.** A Markdown notebook (`world.md`) the agent writes as it plays:
   scenes are identified by a per-room *fingerprint* (a hash of the full background
   tilemap) and connected into a map. Writing is split — code records what it
@@ -54,47 +69,52 @@ work.
 - **Be watched.** `--watch` opens a live window: the upscaled game screen next to
   an overlay of what the agent perceives and decides. (`src/viewer.py`)
 
-Current focus: getting from "explore a room" to "explore, map, read every NPC, and
-pursue a goal (reach a non-violent ending)." Status and the full blow-by-blow are
-in the design log.
+Current focus: getting from "explore, map, and navigate reliably" to "read every
+NPC and pursue a goal (reach a non-violent ending)." Status and the full
+blow-by-blow are in the design log.
 
 ## Status — what works, what doesn't
 
 This is an honest work-in-progress, not a finished product. The value is the
 *architecture and the investigation*, not a bot that beats the game.
 
-**Works (verified by the test suite — 18 ROM/logic tests pass):**
+**Works (verified by the test suite — 22 tests pass: 5 emulator-free, 17 against
+the ROM):**
 - Model-free perception: player position, on-screen text (ROM-font OCR), dialog
   state, per-scene fingerprint, and the in-game day counter.
 - Deterministic skills: `walk_to`, edge-sweep door-finding, `interact`, full-room
   exploration without bouncing out the first door, reverse-crossing (with a
-  self-correcting map), and Yes/No **safety** (the agent never auto-confirms a
-  consequential choice like sleeping).
+  self-correcting map), and **safety** on both consequential menus (sleep, save)
+  — the agent never auto-confirms them.
 - Clean map notebook: multi-tile objects de-dupe to one landmark, and typewriter
   overlap in captured dialogue is merged out (no more "you can you can save").
-- **Breaks out of the house.** One `explore` intent maps a room to completion and
-  follows its far exits, so the agent gets from the bedroom through the living room
-  and **out into the town** — a third area — reading environment text like a
-  "The local School" sign (verified deterministically, `test_explore_reaches_town`).
-- The intent loop end-to-end: the LLM picks `explore` / `go_to` / `interact` /
-  `remember`, a deterministic skill runs it, and a persistent map notebook grows.
-- A swappable LLM backend (local Ollama ↔ any OpenAI-compatible cloud).
+- **Breaks out of the house and navigates outdoors cleanly.** One `explore` intent
+  maps a room to completion and follows its far exits, so the agent gets from the
+  bedroom through the living room, out into the **town**, and on to further outdoor
+  areas (e.g. Urizen Falls) with no self-loops or ping-ponging — the crossing
+  detection that used to break on scrolling/flickering outdoor screens is now
+  correct in both directions (verified deterministically, e.g.
+  `test_no_town_selfloops`, `test_leave_falls`).
+- Day-awareness and cross-room BFS routing (above), and the intent loop end-to-end:
+  the LLM picks `explore` / `go_to` / `interact` / `remember`, a deterministic skill
+  runs it, and a persistent map notebook grows.
+- A swappable LLM backend (local Ollama ↔ any OpenAI-compatible cloud), with
+  proactive token-budget pacing so a run stays under Groq's free-tier rate limit
+  instead of hitting repeated 429s.
 
 **Not working yet / open problems:**
-- **The headline finding: a 3B–8B model is the weak link.** The deterministic
+- **The headline finding: a 3B–20B model is the weak link.** The deterministic
   scaffolding does the heavy lifting; small models plan repetitively and reason
   poorly about space. Getting the boundary right (reflex vs. judgement) *is* the
   project — see the design log's A/B tests.
-- **Town navigation isn't clean yet (open issue #7).** The agent now *reaches* the
-  town, but the town is one large scene navigated by camera "chunks" that share a
-  background tilemap, so the scene-fingerprint collides: `go_to` ping-pongs and the
-  map grows spurious self-loops (`s2 --> s2`). Indoors is unaffected. A true
-  per-screen invariant is still needed (a camera-based fix was tried and disproven).
-- Reaching/reading landmarks **outdoors** often fails (`walk_to` can't get beside
-  them in the open area) — tied to the same collision problem.
-- Cross-room routing over more than two rooms (map-graph BFS) isn't built yet.
-- The game is **not** played to an ending; progress currently stops at clean town
-  navigation.
+- **One remaining unguarded call site.** `walk_to()`, used while approaching a
+  recorded door before the crossing-aware fast path runs, isn't itself
+  crossing-aware — a bad/guessed door coordinate could in principle let it walk
+  through a real boundary uncredited. Same bug class as the crossing-attribution
+  fix above, just not yet routed through it. Flagged, not exploited in any test.
+- The game is **not** played to an ending yet; there's no ending-detection or
+  bloodiness-ranking logic built. Progress currently stops at reliable multi-area
+  navigation and dialogue collection.
 
 ## The design log is the point
 
@@ -111,14 +131,15 @@ conda env create -f environment.yml
 conda activate gameboy-agents
 ```
 
-Install [Ollama](https://ollama.com/) separately and pull the model:
-
-```bash
-ollama pull llama3.2:3b
-```
-
 **ROM:** ⚠️ not included, and never will be. Download the free **Deadeus** ROM from
 the developer (<https://izma.itch.io/deadeus>) and put it at `roms/Deadeus.gb`.
+
+**LLM backend** — recommended: a free Groq API key (cloud, fast). Copy
+`.env.example` to `.env` and fill in `OPENAI_API_KEY`; it's already pointed at
+`https://api.groq.com/openai/v1` with `openai/gpt-oss-20b`. Alternatively, set
+`LLM_BACKEND=ollama` in `.env` and pull a model locally with
+[Ollama](https://ollama.com/) (`ollama pull llama3.2:3b`) — works fully offline,
+but a 3B local model on CPU is **very slow (~1–2 min per decision)**.
 
 Run from the repo root:
 
@@ -133,11 +154,14 @@ python src/agent.py --watch  # with the live viewer
 gameboy-llm-agent/
 ├── src/               # the application
 │   ├── perception.py    # the "eye": position + text from RAM/tilemap; scene fingerprint
-│   ├── navigation.py    # deterministic controller: walk_to / walk_direction / search_for_exit
+│   ├── navigation.py    # deterministic controller: walk_to / step / search_for_exit / menus
 │   ├── roommap.py       # local occupancy mini-map, built from the agent's own moves
+│   ├── crossing.py      # is_crossing_move: real screen crossing vs. a scroll/flicker tick
+│   ├── dialog.py        # merge_dialog: cleans up typewriter-overlap in captured text
 │   ├── memory.py        # the notebook: WorldMap (scenes + connections), saved to world.md
+│   ├── llm.py           # swappable LLM backend (Ollama / any OpenAI-compatible cloud)
 │   ├── viewer.py        # optional live window (--watch): game screen + perception/decision overlay
-│   ├── agent.py         # the loop: LLM planner + deterministic controller
+│   ├── agent.py         # the loop: LLM intent planner + deterministic skills
 │   └── deadeus_font.json # {glyph-hash: char}, all 95 printable ASCII (ROM-derived)
 ├── tests/             # smoke/capability tests: prove one thing each (some need the ROM)
 ├── exploration/       # the "workshop": one-off reverse-engineering probes (see the log)
