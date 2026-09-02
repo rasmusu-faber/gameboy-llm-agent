@@ -7,6 +7,19 @@ That evolution is the point; the log is not rewritten to hide it. Dead-ends stay
 
 [← back to the README](../README.md)
 
+**TL;DR.** Current state: the agent reliably explores rooms, reads dialogue, and
+navigates the house<->town<->falls area end-to-end via an LLM-planner +
+deterministic-skill loop. Screen crossings are now attributed correctly (the
+`step()` primitive, see the last entries); the town is one stable-fingerprint
+screen (no collision - issue #7 self-loops fixed). The game still isn't played to
+an ending, and a stale falls savestate keeps `test_leave_falls` red.
+Top 3 takeaways: **(1)** split reflexes (deterministic code) from judgement (the
+LLM) — small models fail badly at the former and only need to be trusted with the
+latter; **(2)** perception can be fully model-free — RAM reads for position, a
+ROM-derived font hash for on-screen text, no vision model at all; **(3)** even a
+capable model (`gpt-oss-20b`) needs prompt guardrails to keep its stated plan
+concrete rather than collapsing into a restated action — see the last entry below.
+
 ---
 
 - **Test bed is Deadeus, not Pokémon (yet).** The end goal is Pokémon Red, but
@@ -695,3 +708,200 @@ That evolution is the point; the log is not rewritten to hide it. Dead-ends stay
   town crossing collisions (`"tried to reach s2 but didn't cross"`,
   `"aimed for s2, the open door led to s0"`) - expected, not a regression, see the
   open issue #7 entries above.
+
+## Crossing-attribution bug: a delayed teleport, misattributed by `probe_for_crossing`'s undo
+
+- **Symptom.** Watching a live `--watch` run: the agent crossed correctly from town
+  (s2) into Urizen Falls (s3), then immediately walked straight back out again -
+  a left-then-right bounce, every time it tried to reach the school (s4).
+- **The persisted map had the smoking gun.** `memory/world.md` recorded TWO edges
+  out of s3 sharing the exact same `door_tile=(19,16)`: the correct
+  `s3--right-->s2` (matches the already-documented falls topology: only left/right
+  are real exits, up/down are walls) and a bogus `s3--up-->s4`. Same door tile,
+  different direction, different target - physically impossible, so one of them
+  is a misattribution artifact.
+- **Root cause, found by inspection (not a new probe rabbit hole - this is the
+  same bug class the crossing-attribution finding already named, just not yet
+  fixed in code):** `navigation.probe_for_crossing` tries each direction in turn
+  (`right, left, up, down`), and when a direction finds no crossing within `reach`
+  presses, it **blindly undoes** the walk by pressing the opposite direction -
+  with **no fingerprint check at all** during the undo. Since a real crossing
+  fires several ticks *after* the boundary tile is reached (the confirmed delay
+  from the earlier town/falls finding), the following was possible: `right` (the
+  real exit) doesn't show a crossing within its `reach` window, the code gives up
+  and starts undoing with `left` presses - and the delayed `right`-triggered
+  teleport completes silently, unobserved, mid-undo. The outer loop then moves on
+  to try `up`; its very first fingerprint check sees the screen has *already*
+  changed (from the untracked crossing that just happened) and credits `up` -
+  which was pressed once and caused nothing - with a crossing that `right`
+  actually caused.
+- **Two already-tried fixes explicitly ruled out** (both in this log, don't
+  re-attempt): "wait longer" (`settled_fingerprint`, waiting for the fp to
+  stabilize after detection) was pure overhead - the fp was never unstable, so
+  waiting fixed nothing. Grid odometry (coordinate-based scene identity instead
+  of fingerprint) was built and fully reverted - Deadeus's non-Euclidean doors and
+  scrolling screens broke it. The standing lesson holds: fix *when/to-what a
+  crossing is attributed*, not the identity, and not by adding more waiting.
+- **Fix.** Made the undo loop fingerprint-aware too: after every undo press, check
+  for a fingerprint change same as the forward loop does, and if one is found,
+  credit it to `d` (the direction actually being probed, i.e. the real cause) -
+  never to `_OPPOSITE[d]` (the undo direction) and never to whatever direction the
+  outer loop happens to try next. `door_tile` is taken from the position
+  immediately before the press that revealed the crossing, matching how the
+  forward-loop case already computes it.
+- **Verified:** `test_no_town_selfloops`, `test_reverse_crossing`, `test_crossing`,
+  `test_explore_reaches_town`, `test_leave_room`, `test_skills`, `test_walk_to` all
+  stay green. `test_leave_falls` still fails - confirmed via `git stash` to be the
+  **identical pre-existing failure on unmodified HEAD** (a savestate-fixture issue,
+  not a regression from this change). Not yet verified: a live re-run proving the
+  bogus `s3->s4` edge no longer gets created in the first place (only that the
+  stale one, purged by hand from `world.md`, is gone).
+
+## The save-book loop: a two-option menu that wasn't Yes/No
+
+- **Symptom.** A live `--watch` run got stuck around round 12: the agent stood at
+  the bedroom save book and did nothing but **save the game, over and over**.
+- **Root cause - the decline logic only knew Yes/No.** Deadeus's consequential
+  prompts are handled by `_is_choice`/`_decline`/`_menu_forming`, which were
+  hard-coded to the literal words `"Yes"` and `"No"` (so the bed can't be slept on
+  by accident, guarded by `test_bed_decline`). But the save book opens a
+  **`Save Game?` / `Cancel`** menu - no "Yes"/"No" in it. So `_is_choice` returned
+  False, `_menu_forming` returned False, and both `read_dialog` and `dismiss_dialog`
+  fell through to their "advance plain text" branch: `press(A)`. With the cursor
+  sitting on the default **`Save Game?`** option, that A-press *confirms the save*
+  instead of cancelling it - every single time the book is touched. (This is also
+  why `s0`'s facts already contained "Game saved! It is now safe to turn off your
+  system.")
+- **Why it looped rather than saving once.** The save book kept re-appearing as an
+  *unread* landmark because scene identity was simultaneously corrupting (the Bug B
+  crossing-misattribution below): the persisted map showed the town `s2`
+  accumulating **bedroom** landmarks ("So many books", "Time for bed") and
+  contradictory edges (`s1--up-->s2` *and* `s1--down-->s2` sharing one door). With
+  `cur_fp` decoupled from the real screen, the agent believed it was elsewhere while
+  physically parked at the bedroom book, "interacting" with it each round - and each
+  interaction saved (this bug) instead of moving on.
+- **Fix.** Generalized the menu detector to any commit/decline pair, not just
+  Yes/No: `_MENU_COMMIT = ("Yes", "Save")` (top, where the cursor defaults) and
+  `_MENU_DECLINE = ("No", "Cancel")` (bottom, what DOWN+A selects). `_is_choice`
+  fires when both a commit and a decline word are present (the decline word loads
+  last, so its presence means the menu is ready); `_menu_forming` when only the
+  commit word is up; `_decline` still just presses DOWN then A - the same physical
+  layout serves Yes/No and Save/Cancel alike. Case-sensitive so lowercase
+  'save'/'cancel'/'yes'/'no' in prose never fake a menu.
+- **Verified.** New `tests/test_savebook_decline.py`, built like `test_bed_decline`:
+  a **positive control** confirms that forcing A really does save (so "saved" text
+  is detectable), then the `read_dialog` and `dismiss_dialog` paths reach the same
+  book and leave **without** saving, dialog closed. `test_bed_decline` (Yes/No),
+  `test_skills`, `test_interact`, `test_read_text` stay green. ROM-dependent, so it
+  runs locally, not in the ROM-free CI gate.
+
+## Bug B, the real one: a crossing-aware `step()` primitive
+
+The earlier probe-undo patch only fixed one of several sites. The true root cause
+sat in the movement layer: every skill issued a press, ticked a fixed number, then
+polled the fingerprint - and a Deadeus screen transition fires a tick or two AFTER
+the boundary tile, so the poll was at the wrong moment. Two failure modes followed:
+the delayed fp change landed on a LATER, unrelated press (wrong-direction edges like
+`s1--up-->s2`), and a poll during the transition could read garbage.
+
+- **Measured first (two sanctioned probes, per "reproduce before hypothesising").**
+  Tick-by-tick over a real s0->s1 crossing: (1) the transition is short (~1-2
+  samples); (2) mid-transition the player position reads **(0,0)** for one frame
+  while a **1-frame phantom fingerprint** shows, before both settle to the
+  destination. So (0,0) is a reliable "mid-transition, don't trust readings" signal.
+- **The fix: `navigation.step(pyboy, direction, ref_fp) -> StepResult`.** One
+  crossing-aware tile-step: issue the move, then SETTLE (fixed generous ticks, plus
+  a drain of any (0,0) frame) before reading position/fingerprint. Because the read
+  is bound to the causing move, a delayed crossing is attributed to THIS step's
+  direction - never to whatever press happened to be active when the change was
+  later noticed. `explore`, `probe_for_crossing`, `sweep_for_crossing` and
+  `_cross_to_neighbor` all route through it; the probe's undo-attribution hack is
+  gone (step() catches the crossing forward, so it's unnecessary).
+- **Two subtleties the settle exposed, both fixed:**
+  - **`is_crossing_move(slack=0)`, not the default 1.** Some destinations spawn the
+    player at the SAME pixel as the source (s1's spawn == the s0 doorway), so after
+    settling the position barely moves. The default one-tile slack read that as a
+    continuous step and MISSED the crossing (measured: fp went to s1 but `crossed`
+    was False). slack=0 (any deviation from the exact one-tile advance = a crossing)
+    fixes it while still rejecting a scroll-tick (which advances exactly one tile).
+  - **Scene identity is the authority, not raw fp.** At a screen EDGE a transient
+    fp flicker (the 1-frame phantoms) plus slack=0 can make step() fire `crossed`
+    even when the player never actually leaves. So `skill_explore` now, AFTER
+    `advance_cutscene`, compares `fp_key(new_fp)` to `fp_key(cur_fp)`: same key ->
+    we settled back onto THIS screen, a flicker, treat as a normal step (kills the
+    issue-#7 self-loop `s2--dir-->s2`); different key -> a real crossing to record.
+- **Verified.** 20 tests green, including the ones that pin this behavior:
+  `test_no_town_selfloops` (town now shows a clean `[('up','s1')]`, no self-loops),
+  `test_explore_reaches_town` (3 scenes), `test_reverse_crossing`, `test_search_exit`,
+  `test_leave_room`, `test_skills`, `test_explore_full_room`, plus the safety and
+  pure-logic suites.
+- **Correction: there is NO town multi-chunk identity problem.** An earlier draft of
+  this entry claimed the town was a scrolling multi-chunk screen with several fps.
+  That was WRONG. Manual play (scratchpad/play.py, scene-load tracker) settled it:
+  the town is ONE screen, fp `78e83e32`, entered from the house at spawn (32,64) and
+  from the falls at spawn (16,136) - same fingerprint both ways, only the spawn
+  differs. The `scene_fingerprint` is the full 32x32 bg-tilemap hash and is
+  scroll-invariant (constant while scrolling, flips only on a scene load), so one
+  screen = one fp, as designed.
+- **So what is `3498215b`, then?** A FIXTURE artifact, not live behavior. Driving
+  the falls->town crossing from the git-ignored savestate `runs/falls_state/
+  screen_dea6a062....state` stalls: the player position sticks at `(0,0)` and the fp
+  reads `3498215b` for 300+ ticks (a hung mid-load state), whereas the SAME crossing
+  in real play lands cleanly at (16,136)/`78e83e32`. So `test_leave_falls` is red on
+  a stale/bad savestate, not on any real navigation defect. The fixture needs
+  regenerating (hand-walk into the falls with current code and re-save the state);
+  until then the test stays red and is NOT evidence of a live problem.
+
+## Regenerating the falls fixture didn't help - the fixture approach was the problem
+
+- **`scratchpad/play.py` (git-ignored) got an auto-save mode**: on every SETTLED
+  scene load, it now writes `runs/falls_state/screen_<fp>.state` the first time that
+  screen is visited (skipping the `(0,0)` hung-load position so it can't capture the
+  same garbage state again). The user hand-walked house -> town -> falls and
+  regenerated the fixture with today's code.
+- **Still red, with a NEW symptom.** Driving `right` from the fresh state produced
+  ~46px position jumps (144->101->55->9) instead of normal 8px tile steps, and
+  crossed into the SAME `3498215b` garbage fp as before - on a freshly-saved state.
+  So the fixture's age was never the issue: **loading ANY PyBoy savestate and then
+  driving input does not reproduce live physics** for this transition. Confirmed by
+  re-probing every direction from the loaded spawn: only `left` (deeper into the
+  screen, away from any exit) moved in clean 8px steps; every exit-bound direction
+  produced the same garbled jumps. This is a PyBoy save/load-state fidelity gap
+  around GB Studio scene transitions, not a bug in this project's navigation code -
+  out of scope to chase further here.
+- **Rebuilt `tests/test_leave_falls.py` on live navigation instead of a fixture.**
+  Boots from the intro, reaches the town by the same path as
+  `test_explore_reaches_town`, then reaches the falls itself: NOT via
+  `sweep_for_crossing` (its fixed edge-check order - up, corner-first - finds the
+  known way back to the living room before the falls' actual left exit, since the
+  town has several exits), but by walking down toward the door's known row then
+  pushing `step(..., "left", ...)` directly, matching the falls door tile (1,17)
+  observed consistently across live runs. The reached falls state is then snapshotted
+  **in-memory** (`io.BytesIO`, same technique as `test_bed_decline`) and restored
+  between the two edge-recovery trials - a fixture produced by this run's own live
+  play, never a stale file on disk.
+- **A second real bug found and worked around while building this: `walk_to()` inside
+  `_cross_to_neighbor` is NOT crossing-aware.** The wrong-edge recovery trial seeds a
+  deliberately bad door coordinate (as `note_crossing` might guess); before the
+  crossing-aware fast path even runs, `_cross_to_neighbor` first calls `walk_to()`
+  toward that door coordinate to "approach the door" - and `walk_to` is still built
+  on the old, un-settled `press()`, with zero fingerprint awareness. Seeding a door
+  tile that happened to lie in the real exit's direction let `walk_to` silently walk
+  the player straight through the ACTUAL boundary, uncredited and undetected, then
+  keep walking (now on a different screen) toward the same pixel target - landing
+  somewhere unrelated (the school area) with a nonsense message. **This is the same
+  bug class as the original Bug B** (an unguarded press can cross a boundary without
+  being noticed), just at a site `step()` was never routed through. Worked around
+  here by seeding the wrong-edge trial with the falls' own spawn tile as the "door"
+  (so `walk_to` is a no-op and never risks crossing blindly) rather than an arbitrary
+  coordinate - the test now exercises the intended recovery path (fast path bumps a
+  real wall, `probe_for_crossing` finds the true exit) without depending on
+  `walk_to`'s soundness. **Flagged, not fixed**: `_cross_to_neighbor`'s door-approach
+  `walk_to()` should eventually be made crossing-aware too (or replaced by
+  `step()`-based walking) so a similarly-unlucky door guess in LIVE play - not just
+  this test - can't do the same silent damage.
+- **Verified.** `test_leave_falls` now PASSES (correct edge: `'crossed into s0'`;
+  wrong-guess recovery: `'crossed into s0 (corrected the map)'`), plus
+  `test_no_town_selfloops`, `test_reverse_crossing`, `test_search_exit`,
+  `test_explore_reaches_town` stay green - the full crossing-relevant suite is clean
+  for the first time since `step()` was introduced.

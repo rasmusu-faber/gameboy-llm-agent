@@ -19,12 +19,11 @@ from perception import (
 )
 import navigation
 from navigation import (
-    press, walk_direction, walk_to, interact, dismiss_dialog, read_dialog,
-    advance_cutscene, sweep_for_crossing, probe_for_crossing, TILE,
+    press, walk_to, interact, dismiss_dialog, read_dialog,
+    advance_cutscene, sweep_for_crossing, probe_for_crossing, step, TILE,
 )
 from memory import WorldMap, fp_key
 from roommap import RoomMap
-from crossing import is_crossing_move
 import llm
 
 _DELTA = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}
@@ -174,21 +173,24 @@ def skill_explore(pyboy, world, rooms, probed, cur_fp):
         frontier = room.nearest_frontier(ptile)
         if frontier is None:
             return f"explored; room fully mapped{_join(found)}", cur_fp
-        pbefore = player_position(pyboy)
-        moved = walk_direction(pyboy, frontier, max_tiles=1)
+        st = step(pyboy, frontier, cur_fp)                # crossing-aware single step:
+        moved = 1 if st.moved else 0                      # the settle binds a delayed
+                                                          # crossing to THIS frontier move
 
-        if scene_fingerprint(pyboy) != cur_fp:            # the fingerprint changed...
-            heard = advance_cutscene(pyboy)               # ...settle to a movable state,
-            new_fp = scene_fingerprint(pyboy)             # and re-read the fingerprint
-            # A real crossing must land on a DIFFERENT screen AND teleport the player
-            # (not a continuous scroll step). At a town edge the fingerprint briefly
-            # flickers and the player shifts a tile while STAYING on this screen -
-            # is_crossing_move alone was fooled into recording a self-loop (s2->s2);
-            # requiring new_fp != cur_fp rejects that.
-            if new_fp != cur_fp and is_crossing_move(pbefore, player_position(pyboy), frontier):
+        if st.crossed:                                    # step() flagged a settled
+            heard = advance_cutscene(pyboy)               # fingerprint change, attributed
+            new_fp = scene_fingerprint(pyboy)             # to `frontier`; play any entry
+            # scene, then re-read the fingerprint. SCENE IDENTITY is the authority on
+            # whether this was a real crossing: a town-edge scroll/flicker briefly
+            # changes the fp (so step() fires) but settles back onto the SAME screen -
+            # recording that would be the issue-#7 self-loop (s2 --dir--> s2). Only a
+            # landing on a DIFFERENT scene is a real crossing.
+            if fp_key(new_fp) == fp_key(cur_fp):          # settled back to this screen
+                room.observe(ptile, player_tile(pyboy), frontier, moved)  # -> normal step
+            else:
                 nid = world.seen_scene(new_fp, player_position(pyboy))
                 world.note_crossing(cur_fp, frontier, new_fp,
-                                    door_tile=ptile, spawn_tile=player_tile(pyboy))
+                                    door_tile=st.from_tile, spawn_tile=player_tile(pyboy))
                 if heard:
                     world.add_fact(new_fp, heard)         # entry dialogue -> hints
                 dx, dy = _DELTA[frontier]
@@ -206,10 +208,7 @@ def skill_explore(pyboy, world, rooms, probed, cur_fp):
                 rt = player_tile(pyboy)
                 room.mark_door((rt[0] + dx, rt[1] + dy))
                 found.append(f"exit->{nid}")
-                continue
-            # else: a SCROLLING screen ticked the fingerprint while the player walked
-            # on within the SAME physical screen - not a crossing. Keep cur_fp and
-            # treat it as a normal step, so a scroll can't invent a node per tile.
+            continue
 
         room.observe(ptile, player_tile(pyboy), frontier, moved)
         if moved == 0:                                    # a bump: wall or object?
@@ -288,15 +287,14 @@ def _cross_to_neighbor(pyboy, world, cur_fp, target):
             if door and door != (0, 0):         # walk onto the doorway tile
                 walk_to(pyboy, door[0] * TILE, door[1] * TILE)
             for _ in range(4):                  # step through (door may be a tile or two on)
-                press(pyboy, d)
-                if scene_fingerprint(pyboy) != cur_fp:
+                st = step(pyboy, d, cur_fp)     # crossing-aware: settles the transition
+                if st.crossed:                  # before reading, so no phantom fp
                     advance_cutscene(pyboy)     # play any entry scene until movable
                     new_fp = scene_fingerprint(pyboy)
                     if fp_key(new_fp) == target_key:   # landed on the TARGET screen
                         world.seen_scene(new_fp, player_position(pyboy))
                         return f"go_to: crossed into {target}", new_fp
-                    if new_fp != cur_fp:        # crossed, but NOT to the target
-                        break
+                    break                       # crossed, but NOT to the target
             return _cross_by_sweep(pyboy, world, cur_fp, target)
     return f"go_to: '{target}' isn't a connected room", cur_fp
 

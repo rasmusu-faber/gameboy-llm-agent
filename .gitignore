@@ -12,6 +12,9 @@ roms/*
 # Agent run outputs (screenshots, logs, trajectories)
 runs/
 
+# Throwaway manual-play / measurement scripts
+scratchpad/
+
 # Agent memory notebook — per-savegame runtime state, not part of the repo
 memory/
 

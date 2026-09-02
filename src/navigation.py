@@ -6,8 +6,10 @@ A/B test showed small models mis-handle exactly this. The LLM decides *where* to
 go; walk_to() gets there.
 """
 
+from collections import namedtuple
+
 from perception import (
-    player_position, scene_fingerprint, visible_dialog_text, dialog_open,
+    player_position, player_tile, scene_fingerprint, visible_dialog_text, dialog_open,
 )
 from dialog import merge_dialog
 from crossing import is_crossing_move
@@ -29,14 +31,74 @@ FRAME_HOOK = None
 
 
 def press(pyboy, button, hold=6, wait=16):
+    # FRAME_HOOK fires on every tick, not just once at the end: PyBoy already
+    # computes the full walk-cycle animation across these hold+wait ticks, but a
+    # single repaint after all of them turned each tile move into a hard jump-cut
+    # in the --watch viewer. Costs nothing headless (FRAME_HOOK is None then).
     pyboy.button_press(button)
     for _ in range(hold):
         pyboy.tick()
+        if FRAME_HOOK is not None:
+            FRAME_HOOK(pyboy)
     pyboy.button_release(button)
     for _ in range(wait):
         pyboy.tick()
-    if FRAME_HOOK is not None:
-        FRAME_HOOK(pyboy)
+        if FRAME_HOOK is not None:
+            FRAME_HOOK(pyboy)
+
+
+# One crossing-aware tile-step. `crossed` is a REAL screen crossing caused by THIS
+# step; `from_tile` is the tile stepped from (the door side); `new_fp` is the
+# settled destination fingerprint.
+StepResult = namedtuple("StepResult", "moved crossed from_tile new_fp")
+
+# A Deadeus screen transition fires a tick or two AFTER the boundary tile is
+# entered, and mid-transition the RAM player position reads (0,0) for ~1 frame
+# while a 1-frame PHANTOM fingerprint shows (both measured, docs/design-log.md).
+# So a step must settle past that before trusting position/fp - otherwise the
+# delayed crossing lands on a LATER, unrelated press (wrong-direction edges) or a
+# read hits the phantom (ghost scenes).
+_STEP_SETTLE = 40        # ticks to let the move + any delayed transition finish
+_TRANSITION_POS = (0, 0)  # the mid-transition garbage position reading
+
+
+def step(pyboy, direction, ref_fp) -> StepResult:
+    """Issue ONE tile-step in `direction`, then settle so a DELAYED screen crossing
+    is caught HERE and attributed to THIS step - never to a later press. Reading
+    position/fingerprint only after the settle (and draining the (0,0) transition
+    frame) also skips the 1-frame phantom fingerprint. This is the fix for the
+    crossing-misattribution family (wrong-direction edges, ghost scenes): detection
+    is bound to the causing move by construction, not to whichever press happened to
+    be active when the fingerprint change was noticed."""
+    before = player_position(pyboy)
+    from_tile = player_tile(pyboy)
+    pyboy.button_press(direction)
+    for _ in range(6):
+        pyboy.tick()
+        if FRAME_HOOK is not None:
+            FRAME_HOOK(pyboy)
+    pyboy.button_release(direction)
+    for _ in range(_STEP_SETTLE):               # no early break: the RAM position
+        pyboy.tick()                            # updates in 8px jumps, so an early
+        if FRAME_HOOK is not None:              # "stable" read could catch the tile
+            FRAME_HOOK(pyboy)                   # mid-move - just let it settle fully
+    drain = 0
+    while player_position(pyboy) == _TRANSITION_POS and drain < 20:
+        pyboy.tick()                            # still mid-transition - wait for a
+        if FRAME_HOOK is not None:              # valid position before reading
+            FRAME_HOOK(pyboy)
+        drain += 1
+    after = player_position(pyboy)
+    new_fp = scene_fingerprint(pyboy)
+    # A real crossing = the SETTLED fingerprint is a different screen AND the move
+    # was not a clean one-tile advance. slack=0 (not the default 1) is essential:
+    # some destinations spawn the player at the SAME pixel as the source (e.g. s1's
+    # spawn == the s0 doorway), so the position barely moves - a one-tile slack
+    # would wrongly read that as "continuous" and miss the crossing. A scroll-tick
+    # (fp changes as a screen edge scrolls) DOES advance exactly one tile, so
+    # slack=0 still rejects it; only a teleport or a near-zero move counts.
+    crossed = new_fp != ref_fp and is_crossing_move(before, after, direction, slack=0)
+    return StepResult(after != before, crossed, from_tile, new_fp)
 
 
 def _moves_toward(x, y, tx, ty):
@@ -97,12 +159,10 @@ def sweep_for_crossing(pyboy, ref_fp, sweep_len=16, push=4):
             walk_direction(pyboy, m, max_tiles=20)
         for _ in range(sweep_len):
             for _ in range(push):             # push outward at this column/row
-                prev = player_position(pyboy)
-                press(pyboy, push_dir)
-                if scene_fingerprint(pyboy) != ref_fp:
-                    now = player_position(pyboy)
-                    if is_crossing_move(prev, now, push_dir):
-                        return push_dir, (prev[0] // TILE, prev[1] // TILE)
+                st = step(pyboy, push_dir, ref_fp)   # crossing-aware push
+                if st.crossed:
+                    return push_dir, st.from_tile
+                if st.new_fp != ref_fp:
                     break                     # a scroll-tick, not an exit: this is a
                     # scrolling edge - stop pushing into it and move along the sweep
             if walk_direction(pyboy, sweep_dir, max_tiles=1) == 0:
@@ -128,22 +188,19 @@ def probe_for_crossing(pyboy, ref_fp, reach=4):
     """
     for d in ("right", "left", "up", "down"):
         walked = 0
-        hit = None
         for _ in range(reach):
-            prev = player_position(pyboy)
-            press(pyboy, d)
-            now = player_position(pyboy)
-            if scene_fingerprint(pyboy) != ref_fp:
-                if is_crossing_move(prev, now, d):     # a real teleport = a crossing
-                    hit = (d, (prev[0] // TILE, prev[1] // TILE))
-                break                                   # crossed (or a scroll/anim tick): stop
-            if now == prev:
+            st = step(pyboy, d, ref_fp)                 # crossing-aware: a delayed
+            if st.crossed:                              # teleport is caught here and
+                return d, st.from_tile                  # attributed to THIS direction
+            if not st.moved:
                 break                                   # blocked by a wall
             walked += 1
-        if hit:
-            return hit
-        for _ in range(walked):                         # undo the walk, stay in place
-            press(pyboy, _OPPOSITE[d])
+        for _ in range(walked):                         # no crossing this way: walk back
+            back = step(pyboy, _OPPOSITE[d], ref_fp)    # to where we started. step()
+            if back.crossed:                            # already settles the transition,
+                return d, back.from_tile                # so this rarely fires - defensive:
+                                                        # a crossing surfacing now was
+                                                        # caused by `d`, not the undo.
     return None, None
 
 
@@ -184,30 +241,47 @@ def _dialog_words(pyboy):
     return visible_dialog_text(pyboy).replace("?", " ").split() if dialog_open(pyboy) else []
 
 
+# A two-option menu pairs a COMMIT option (cursor starts here, top) with a DECLINE
+# option (safe, bottom). Deadeus uses more than one such pair: the bed/monster
+# prompts are Yes/No, but the SAVE BOOK is 'Save Game?' / 'Cancel'. Recognizing
+# only Yes/No meant the save menu fell through to a plain-text A-press, which
+# confirmed the default 'Save Game?' and saved on every touch. Case-sensitive so
+# lowercase 'yes'/'no'/'save'/'cancel' in prose never trigger a menu.
+_MENU_COMMIT = ("Yes", "Save")      # top option, where the cursor defaults
+_MENU_DECLINE = ("No", "Cancel")    # bottom option, what DOWN+A selects
+
+
 def _is_choice(pyboy) -> bool:
-    """True once a Yes/No menu is FULLY loaded (both options visible). Deadeus
-    loads 'Yes' then 'No' slowly; the cursor starts on Yes. B does nothing - to
-    decline you must move DOWN to No and press A. Case-sensitive so lowercase
-    'yes'/'no' in prose don't trigger it."""
+    """True once a two-option menu is FULLY loaded (both options visible). The
+    bottom (decline) option loads last, so its presence means the menu is ready.
+    Deadeus's cursor starts on the top (commit) option and B does nothing - to
+    decline you must move DOWN to the bottom option and press A. Covers Yes/No AND
+    the save book's 'Save Game?'/'Cancel'."""
     words = _dialog_words(pyboy)
-    return "Yes" in words and "No" in words
+    top = any(w in words for w in _MENU_COMMIT)
+    bottom = any(w in words for w in _MENU_DECLINE)
+    return top and bottom
 
 
 def _menu_forming(pyboy) -> bool:
-    """The choice menu is appearing ('Yes' up, 'No' not yet) - do NOT press A now
-    (it would confirm the default Yes); wait for it to finish loading."""
+    """The choice menu is appearing (top option up, bottom not yet) - do NOT press
+    A now (it would confirm the default commit option); wait for it to finish
+    loading."""
     words = _dialog_words(pyboy)
-    return "Yes" in words and "No" not in words
+    top = any(w in words for w in _MENU_COMMIT)
+    bottom = any(w in words for w in _MENU_DECLINE)
+    return top and not bottom
 
 
 def _decline(pyboy):
-    """Answer a Yes/No menu with No. The menu defaults to Yes and B does nothing,
-    and it isn't interactive the instant both options render - so settle first,
-    then move DOWN to No and press A."""
+    """Pick the safe (bottom) option of a two-option menu: No on a Yes/No prompt,
+    Cancel on the save book. The cursor defaults to the top (commit) option and B
+    does nothing, and the menu isn't interactive the instant both options render -
+    so settle first, then move DOWN to the bottom option and press A."""
     for _ in range(20):
         pyboy.tick()
-    press(pyboy, "down")                     # Yes (default) -> No
-    press(pyboy, "a")                        # confirm No
+    press(pyboy, "down")                     # commit (default) -> decline
+    press(pyboy, "a")                        # confirm the safe option
 
 
 def _stable_dialog(pyboy, tries=6) -> str:
