@@ -11,7 +11,7 @@ the world only by reading the emulator's memory?**
 
 This is a hands-on learning project about building LLM agents from scratch. The
 agent plays **Deadeus**, a free, open-source Game Boy horror game (a boy has three
-in-game days and eleven possible endings). It perceives the world model-free — RAM
+in-game days to prevent a catastrophe and reach one of the eleven possible endings). It perceives the world model-free — RAM
 and the tilemap, no screenshots into a vision model — and an LLM makes the
 judgement calls, through a swappable backend (local Ollama, or a cloud
 OpenAI-compatible endpoint — the reference setup uses Groq's free tier with
@@ -19,6 +19,13 @@ OpenAI-compatible endpoint — the reference setup uses Groq's free tier with
 project started as a Pokémon Red idea and pivoted to Deadeus, which is legal to
 redistribute, so the whole thing can be open-sourced — the same RAM- and
 tilemap-reading techniques apply to either game.
+
+![The agent reading landmarks, discovering the save mechanic, and crossing into a new room, with its round-by-round reasoning overlaid](docs/demo.gif)
+
+*10 rounds against Groq's `gpt-oss-20b`: reads the room's landmarks, discovers the
+save mechanic, crosses into the next room, and picks up a lead ("check on the girl
+next door") — with the LLM's own intent, reasoning ("why"), and running plan
+overlaid per round. Recorded with [`scripts/record_demo.py`](scripts/record_demo.py).*
 
 ## The one idea worth taking away: reflexes vs. judgement
 
@@ -107,6 +114,12 @@ the ROM):**
   scaffolding does the heavy lifting; small models plan repetitively and reason
   poorly about space. Getting the boundary right (reflex vs. judgement) *is* the
   project — see the design log's A/B tests.
+- **Goal-directed routing can loop.** `go_to`'s BFS routing reliably *crosses*
+  rooms — the mechanics above are solid — but the LLM's own choice of target
+  isn't: once a lead names someone/something it can't yet resolve, the agent can
+  revisit the same two or three rooms indefinitely with no new information, since
+  nothing tracks "already checked here for this lead." Seen over multiple live
+  15–20 round runs.
 - **One remaining unguarded call site.** `walk_to()`, used while approaching a
   recorded door before the crossing-aware fast path runs, isn't itself
   crossing-aware — a bad/guessed door coordinate could in principle let it walk
@@ -116,7 +129,7 @@ the ROM):**
   bloodiness-ranking logic built. Progress currently stops at reliable multi-area
   navigation and dialogue collection.
 
-## The design log is the point
+## The design log
 
 **[`docs/design-log.md`](docs/design-log.md)** is a chronological record of every
 decision *and every dead-end* — the local vision model that was too slow, the RAM
@@ -170,11 +183,6 @@ gameboy-llm-agent/
 ├── environment.yml
 └── roms/              # your own ROM goes here (git-ignored)
 ```
-
-## Part 2 (later, separate)
-
-An RL agent on the same task, then an LLM-vs-RL comparison — the recurring
-"compare the methods honestly" theme of these projects.
 
 ## License
 
