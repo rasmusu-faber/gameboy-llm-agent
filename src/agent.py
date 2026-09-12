@@ -47,12 +47,21 @@ INTENT_SYSTEM = (
     "Actions:\n"
     "- explore : map more of the CURRENT room (find its exits and objects). Use "
     "while the room is not fully explored.\n"
-    "- go_to <id> : walk to a known landmark (l0, l1, …) or a connected room "
-    "(s0, s1, …). Use to revisit an object or to leave through a known exit.\n"
+    "- go_to <id> : walk to a known landmark (l0, l1, …) or a connected room, by its "
+    "id (s0, s1, …) OR by a label you've already set on it (e.g. 'her room'). Use to "
+    "revisit an object or to leave through a known exit.\n"
     "- interact <id> : read/talk to a landmark, but ONLY one listed under "
     "'Landmarks here'. Those ids live in the CURRENT room. To read something in "
     "another room, go_to that room FIRST - an id from another room will fail.\n"
     "- remember <note> : write down a short conclusion worth keeping.\n"
+    "Rooms are shown to you only as bare ids (s0, s1, …) unless YOU name them. Once "
+    "you can tell what a room IS from what you've read or seen there (whose house, "
+    "whose room, a shop, the school), set 'room_label' to a short name (2-4 words, "
+    "e.g. 'her room', 'dad's house downstairs', 'school') for the room you are IN "
+    "right now - it will be shown next to that room's id from then on, including in "
+    "go_to targets, so you stop confusing similar-looking ids. Leave it empty once "
+    "a room already has a good label. A room's label can be corrected later if you "
+    "learn it was wrong.\n"
     "Reading and exploring are only MEANS. The POINT is to pursue your goal: find out "
     "how to prevent the entity's return WITHOUT harming anyone, and check on the "
     "people who matter to you. Turn what you learn into ACTION - do not just map the "
@@ -75,10 +84,18 @@ INTENT_SYSTEM = (
     "Do NOT re-read what you've already read, and do NOT wander room to room, while a "
     "concrete lead or unmet plan remains. You are told the current day and how many "
     "days remain; time is limited, so weigh it toward the goal.\n"
+    "You are told which rooms are ALREADY CHECKED for your current plan - every "
+    "landmark there is already read, so a bare go_to there teaches you nothing new "
+    "for this plan. Do NOT go_to an already-checked room again just to look around. "
+    "If a checked room is also NOT fully explored yet, an `explore` there (not go_to) "
+    "can still turn up a new exit or object worth finding. If every known room is "
+    "checked AND fully explored, the lead is a dead end for now: change your subgoal "
+    "to something else (a different lead or a landmark you haven't reached yet).\n"
     "Use 'note' with the remember action to write down anything important.\n"
     'Respond ONLY as JSON: {"action":"explore|go_to|interact|remember",'
     '"target":"<id or empty>","note":"<for remember>",'
-    '"subgoal":"<your current plan>","why":"<short reason>"}'
+    '"subgoal":"<your current plan>","room_label":"<name for the CURRENT room, or empty>",'
+    '"why":"<short reason>"}'
 )
 
 
@@ -195,7 +212,7 @@ def skill_explore(pyboy, world, rooms, probed, cur_fp):
                     world.add_fact(new_fp, heard)         # entry dialogue -> hints
                 dx, dy = _DELTA[frontier]
                 room.mark_door((ptile[0] + dx, ptile[1] + dy))  # fence this doorway
-                _, back_fp = skill_go_to(pyboy, world, new_fp, world.scene_id(cur_fp))
+                _, back_fp = skill_go_to(pyboy, world, new_fp, world.scene_id(cur_fp), rooms=rooms)
                 if back_fp != cur_fp:                     # couldn't return -> accept it
                     note = f" (scene: {heard[:24]!r})" if heard else ""
                     return (f"explored; found exit to {nid} but stayed there"
@@ -236,15 +253,28 @@ def explore_to_completion(pyboy, world, rooms, probed, cur_fp):
     return result, cur_fp
 
 
-def skill_go_to(pyboy, world, cur_fp, target):
+def _room_for(rooms, fp):
+    """The RoomMap `walk_to` should path/map through for scene `fp`, or None if
+    the caller has no `rooms` dict (a bare skill call, e.g. most tests) - `walk_to`
+    then falls back to its old blind-greedy behaviour, unchanged."""
+    return rooms.setdefault(fp, RoomMap()) if rooms is not None else None
+
+
+def skill_go_to(pyboy, world, cur_fp, target, rooms=None):
     """Walk to a known landmark or reach a room, routing across several rooms if need be.
 
-    `target` may be a landmark id (l#), a room id (s#), or a bare exit direction
-    (up/down/left/right) - the LLM tends to name the direction, so resolve it to
-    the room that exit leads to. A room (or a landmark's room) that is not a direct
-    neighbour is reached by a BFS route (`WorldMap.route`) walked one hop at a time
+    `target` may be a landmark id (l#), a room id (s#), a room's LLM-assigned label
+    (e.g. 'her room'), or a bare exit direction (up/down/left/right) - the LLM tends
+    to name the direction, so resolve it to the room that exit leads to. A room (or
+    a landmark's room) that is not a direct neighbour is reached by a BFS route
+    (`WorldMap.route`) walked one hop at a time
     (`_follow_route`); a direct neighbour crosses in one hop (`_cross_to_neighbor`).
     Only known/observed edges are used, so an unexplored target reports honestly.
+
+    `rooms` (main()'s cur_fp -> RoomMap dict, optional): passed down to `walk_to`
+    so it can path AROUND an obstacle between here and the target instead of
+    walking straight at it and stopping dead the moment it's blocked - measured
+    live on Deadeus's town screen, see the design-log entry on the go_to loop.
     """
     if not target:
         return "go_to needs a target (a landmark l#, a room s#, or a direction)", cur_fp
@@ -253,6 +283,10 @@ def skill_go_to(pyboy, world, cur_fp, target):
         if not match:
             return f"go_to: no known exit '{target}' from here", cur_fp
         target = match[0]
+    else:
+        by_label = world.find_by_label(target)  # a room named via 'room_label', not
+        if by_label:                             # its bare id - resolve it the same way
+            target = by_label
 
     cur_id = world.scene_id(cur_fp)
     if target == cur_id:                        # already here - don't sweep our own room
@@ -261,23 +295,26 @@ def skill_go_to(pyboy, world, cur_fp, target):
     lm = world.find_landmark(target)
     if lm:
         if lm["scene"] != cur_id:               # landmark in another room: route there first
-            msg, cur_fp = _follow_route(pyboy, world, cur_fp, lm["scene"])
+            msg, cur_fp = _follow_route(pyboy, world, cur_fp, lm["scene"], rooms=rooms)
             if world.scene_id(cur_fp) != lm["scene"]:
                 return msg, cur_fp              # stalled en route - report where we stopped
         tx, ty = lm["tile"]
-        ok = walk_to(pyboy, tx * TILE, ty * TILE)
-        return (f"go_to: reached {target}" if ok
+        wr = walk_to(pyboy, tx * TILE, ty * TILE, ref_fp=cur_fp, room=_room_for(rooms, cur_fp))
+        if wr.crossed:                           # a stale landmark tile walked us
+            world.seen_scene(wr.new_fp, player_position(pyboy))  # through a real
+            return f"go_to: approaching {target} crossed into a new room", wr.new_fp  # boundary
+        return (f"go_to: reached {target}" if wr.reached
                 else f"go_to: stopped next to {target}"), cur_fp
 
     if target not in {s["id"] for s in world.scene_list()}:
         return f"go_to: '{target}' isn't a known landmark or connected room", cur_fp
     # a known room: cross directly if it neighbours us, else route across rooms (BFS)
     if any(tid == target for _d, tid, _door in world.exits_detailed(cur_fp)):
-        return _cross_to_neighbor(pyboy, world, cur_fp, target)
-    return _follow_route(pyboy, world, cur_fp, target)
+        return _cross_to_neighbor(pyboy, world, cur_fp, target, rooms=rooms)
+    return _follow_route(pyboy, world, cur_fp, target, rooms=rooms)
 
 
-def _cross_to_neighbor(pyboy, world, cur_fp, target):
+def _cross_to_neighbor(pyboy, world, cur_fp, target, rooms=None):
     """Cross into a DIRECTLY connected room `target`: walk to the recorded door and
     step through, accepting the crossing only when the landed fp IS the target's, then
     hand off to a self-correcting sweep. Returns (message, new_fp)."""
@@ -285,21 +322,35 @@ def _cross_to_neighbor(pyboy, world, cur_fp, target):
     for d, tid, door in world.exits_detailed(cur_fp):
         if tid == target:
             if door and door != (0, 0):         # walk onto the doorway tile
-                walk_to(pyboy, door[0] * TILE, door[1] * TILE)
+                wr = walk_to(pyboy, door[0] * TILE, door[1] * TILE, ref_fp=cur_fp,
+                             room=_room_for(rooms, cur_fp))
+                if wr.crossed:                   # a bad/guessed door coordinate walked
+                    return _land_crossing(       # us straight through the real boundary -
+                        pyboy, world, wr.new_fp, target, target_key)  # handle it, don't
+                                                  # silently keep walking on the new screen
             for _ in range(4):                  # step through (door may be a tile or two on)
                 st = step(pyboy, d, cur_fp)     # crossing-aware: settles the transition
                 if st.crossed:                  # before reading, so no phantom fp
-                    advance_cutscene(pyboy)     # play any entry scene until movable
-                    new_fp = scene_fingerprint(pyboy)
-                    if fp_key(new_fp) == target_key:   # landed on the TARGET screen
-                        world.seen_scene(new_fp, player_position(pyboy))
-                        return f"go_to: crossed into {target}", new_fp
-                    break                       # crossed, but NOT to the target
+                    return _land_crossing(pyboy, world, st.new_fp, target, target_key)
             return _cross_by_sweep(pyboy, world, cur_fp, target)
     return f"go_to: '{target}' isn't a connected room", cur_fp
 
 
-def _follow_route(pyboy, world, cur_fp, target_room):
+def _land_crossing(pyboy, world, new_fp, target, target_key):
+    """Handle having just crossed a real boundary (however it happened - stepping
+    through the recorded door, or an unlucky door/landmark coordinate walking us
+    through one) while aiming for `target`. Records the landing and, if it isn't
+    the target after all, falls back to the recovery sweep FROM the screen we
+    actually landed on."""
+    advance_cutscene(pyboy)                      # play any entry scene until movable
+    new_fp = scene_fingerprint(pyboy)
+    world.seen_scene(new_fp, player_position(pyboy))
+    if fp_key(new_fp) == target_key:             # landed on the TARGET screen
+        return f"go_to: crossed into {target}", new_fp
+    return _cross_by_sweep(pyboy, world, new_fp, target)  # crossed, but NOT to the target
+
+
+def _follow_route(pyboy, world, cur_fp, target_room, rooms=None):
     """Walk a multi-room BFS route to `target_room`, one hop at a time, verifying each
     landing by fingerprint. Stops honestly if a hop fails so the LLM can re-plan -
     never presses blindly onward. Returns (message, new_fp)."""
@@ -309,7 +360,7 @@ def _follow_route(pyboy, world, cur_fp, target_room):
     if not hops:                                # already in the target room
         return f"go_to: already in {target_room}", cur_fp
     for _direction, next_id in hops:
-        _msg, cur_fp = _cross_to_neighbor(pyboy, world, cur_fp, next_id)
+        _msg, cur_fp = _cross_to_neighbor(pyboy, world, cur_fp, next_id, rooms=rooms)
         if world.scene_id(cur_fp) != next_id:   # a hop didn't land where planned
             return (f"go_to: route to {target_room} stalled at "
                     f"{world.scene_id(cur_fp)} (wanted {next_id})"), cur_fp
@@ -345,7 +396,7 @@ def _cross_by_sweep(pyboy, world, cur_fp, target):
     return f"go_to: aimed for {target}, the open door led to {landed}", new_fp
 
 
-def skill_interact(pyboy, world, cur_fp, target, read=None):
+def skill_interact(pyboy, world, cur_fp, target, read=None, rooms=None):
     """Walk up to a known landmark, face it, and read its FULL dialogue.
 
     Two-stream model: the conversation goes to the scene's facts (the "heard"
@@ -367,7 +418,11 @@ def skill_interact(pyboy, world, cur_fp, target, read=None):
                 if lm["text"] and o["text"] == lm["text"]]
         read.update(same or [target])
     tx, ty = lm["tile"]
-    walk_to(pyboy, tx * TILE, ty * TILE)        # stops adjacent (object blocks)
+    wr = walk_to(pyboy, tx * TILE, ty * TILE, ref_fp=cur_fp,  # stops adjacent (object
+                 room=_room_for(rooms, cur_fp))                # blocks)
+    if wr.crossed:                               # a stale landmark tile walked us
+        world.seen_scene(wr.new_fp, player_position(pyboy))    # through a real boundary
+        return f"interact: approaching {target} crossed into a new room", wr.new_fp
     face = _dir_to(player_tile(pyboy), (tx, ty))
     if face is None:
         return f"interact: couldn't get beside {target}", cur_fp
@@ -422,12 +477,17 @@ def _house_overview(world, rooms, cur_id):
     return "\n".join(lines)
 
 
-def build_state(world, rooms, cur_fp, pyboy, log, subgoal, read=None):
+def build_state(world, rooms, cur_fp, pyboy, log, subgoal, read=None, checked=None):
     """The intent-level state the LLM chooses from (not raw (x, y)). `read` is the
     set of landmark ids already interacted with this run - used to surface which
     landmarks are still worth reading, so the agent acts instead of re-reading or
-    mapping endlessly."""
+    mapping endlessly. `checked` is {subgoal: {room_id, ...}} - rooms already fully
+    read/mapped while pursuing the CURRENT subgoal, so a stuck lead (names somewhere
+    the agent can't yet resolve) surfaces as a fact instead of an invisible loop -
+    small models don't track their own revisit history, so code does (see the
+    design-log entry on the go_to loop problem)."""
     read = read or set()
+    checked = checked or {}
     cur_id = world.scene_id(cur_fp)
     label = world.label_of(cur_fp)
     room_name = cur_id + (f" ({label})" if label else "")
@@ -472,9 +532,19 @@ def build_state(world, rooms, cur_fp, pyboy, log, subgoal, read=None):
     left = max(0, 3 - day)
     time_line = (f"day {day} of 3 - {left} day(s) left before the entity returns. "
                  "Sleeping in a bed ends the current day.")
+    checked_here = checked.get(subgoal, set()) if subgoal else set()
+    known_rooms = {s["id"] for s in world.scene_list()}
+    if not checked_here:
+        checked_line = "none yet"
+    elif checked_here >= known_rooms:
+        checked_line = f"{', '.join(sorted(checked_here))} - EVERY known room; this plan is a dead end for now"
+    else:
+        checked_line = ", ".join(sorted(checked_here))
     return (f"Premise (what you know about the game): {premise}\n"
             f"Time: {time_line}\n"
             f"Your current plan: {subgoal or 'none yet - decide one from the goal'}\n"
+            f"Rooms already checked for this plan (fully read, nothing new - don't "
+            f"go_to these again for this plan): {checked_line}\n"
             f"House so far (all known rooms):\n{house}\n"
             f"Current room: {room_name}\n"
             f"Known exits: {exits_str}\n"
@@ -497,6 +567,7 @@ def plan_intent(state):
             "target": str(c.get("target", "")).strip(),
             "note": str(c.get("note", "")).strip(),
             "subgoal": str(c.get("subgoal", "")).strip(),
+            "room_label": str(c.get("room_label", "")).strip()[:30],
             "why": str(c.get("why", "")).strip()}
 
 
@@ -539,6 +610,7 @@ def main(watch=False, rounds=INTENT_ROUNDS, delay=0.0):
     read = set()  # landmark ids already interacted with (so we act, not re-read)
     log = []      # recent (intent-label, result) for the state
     subgoal = ""  # the LLM's running plan toward the goal (it maintains this)
+    checked = {}  # subgoal -> {room_id, ...} already fully read/mapped under it (loop guard)
 
     try:
       for r in range(1, rounds + 1):
@@ -553,30 +625,52 @@ def main(watch=False, rounds=INTENT_ROUNDS, delay=0.0):
             continue
 
         rooms.setdefault(cur_fp, RoomMap()).mark_floor(player_tile(pyboy))
-        state = build_state(world, rooms, cur_fp, pyboy, log, subgoal, read)
+        state = build_state(world, rooms, cur_fp, pyboy, log, subgoal, read, checked)
         intent = plan_intent(state)
         if intent is None:                      # planner failed -> just explore
             intent = {"action": "explore", "target": "", "note": "",
-                      "subgoal": "", "why": "fallback"}
+                      "subgoal": "", "room_label": "", "why": "fallback"}
         if intent["subgoal"]:                   # the LLM maintains its own plan
             subgoal = intent["subgoal"]
+        labeled_room = None
+        if intent["room_label"]:                # the LLM names the room it's IN right
+            labeled_room = world.scene_id(cur_fp)          # now (before the action can
+            world.set_label(cur_fp, intent["room_label"])  # move it on) - bare ids (s3
+            # vs s6) are exactly what it was confusing turns ago (see design-log)
 
         action, target = intent["action"], intent["target"]
         if action == "explore":
             result, cur_fp = explore_to_completion(pyboy, world, rooms, probed, cur_fp)
         elif action == "go_to":
-            result, cur_fp = skill_go_to(pyboy, world, cur_fp, target)
+            result, cur_fp = skill_go_to(pyboy, world, cur_fp, target, rooms=rooms)
         elif action == "interact":
-            result, cur_fp = skill_interact(pyboy, world, cur_fp, target, read)
+            result, cur_fp = skill_interact(pyboy, world, cur_fp, target, read, rooms=rooms)
         else:  # remember
             result = skill_remember(world, cur_fp, intent["note"])
 
         label = action + (f" {target}" if target else "")
         log.append((label, result))
+        if subgoal:                          # a room whose KNOWN landmarks are all
+            cur_id = world.scene_id(cur_fp)  # already read, under the CURRENT plan, is
+            has_unread = any(lm["id"] not in read for lm in world.landmarks_of(cur_fp))
+            # Deliberately NOT gated on the local RoomMap's frontier (unexplored tiles):
+            # `rooms` starts empty every run and is only filled by an actual `explore`
+            # pass, so on a run that resumes a persisted world.md this was almost
+            # always non-empty (a fresh room has nothing marked walked yet) and
+            # "checked" never fired at all - measured live: a 25-round run chasing
+            # "check on the girl next door" bounced go_to s0/s1/s2 for 15 straight
+            # rounds with this guard silently never engaging. Landmark completeness
+            # (from the persistent world map + this run's `read` set) is the reliable
+            # cross-run signal for "nothing left to READ here"; a still-unexplored
+            # room can still be worth an `explore` (a hidden exit may be out there) -
+            # `checked` only says a bare go_to won't teach it anything new.
+            if not has_unread:
+                checked.setdefault(subgoal, set()).add(cur_id)
         world.save(WORLD)                    # persist per round (a hard kill skips finally)
         pyboy.screen.image.save(OUT / f"intent_{r:02d}_{action}.png")
         why = str(intent.get("why", ""))[:48]
-        print(f"[{r:02d}] day{game_day(pyboy)} {label:14s} why={why!r}\n"
+        labeled = f" labeled {labeled_room!r} as {intent['room_label']!r}" if labeled_room else ""
+        print(f"[{r:02d}] day{game_day(pyboy)} {label:14s} why={why!r}{labeled}\n"
               f"      plan={subgoal[:48]!r} -> {result}")
         if viewer:
             viewer.set_overlay(round=r, day=game_day(pyboy), intent=label,

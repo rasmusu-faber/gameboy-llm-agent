@@ -72,6 +72,54 @@ def main():
     wm.mark_floor((6, 5))                     # standing on it discards the wall
     assert wm.nearest_frontier((5, 5)) == "right", "mark_wall is (intentionally) not durable"
 
+    # --- find_path (walk_to's real-pathfinding upgrade, see design-log) --------
+
+    # Straight corridor, no obstacles: a direct direction sequence.
+    corridor = RoomMap()
+    for x in range(0, 4):
+        corridor.mark_floor((x, 0))
+    assert corridor.find_path((0, 0), (3, 0)) == ["right", "right", "right"]
+    assert corridor.find_path((0, 0), (0, 0)) == []          # already there
+
+    # Goal is an OBSTACLE (never marked floor, e.g. a landmark's own tile): the
+    # path must stop at a floor tile ADJACENT to it, not attempt to enter it.
+    beside = RoomMap()
+    beside.mark_floor((0, 0))
+    beside.mark_floor((1, 0))                 # floor tile beside the obstacle at (2,0)
+    path = beside.find_path((0, 0), (2, 0))
+    assert path == ["right"], path            # stops at (1,0), one short of the obstacle
+
+    # Goal IS known floor (a real, already-crossed door) with an EQUALLY CLOSE
+    # floor neighbour: the path must land EXACTLY on the door, never settle for
+    # the neighbour just because BFS reached it first. This is the live bug: a
+    # door's neighbours are also valid floor, so treating them as interchangeable
+    # stops made walk_to land one tile short of the threshold, missing the
+    # subsequent crossing press entirely (see design-log).
+    door_room = RoomMap()
+    #   (0,0)-(1,0)-(2,0)   <- (2,0) is the door; (1,0) is its floor neighbour,
+    #                          reached by BFS at the SAME distance as (2,0) itself
+    #                          would be reached one step later - if find_path ever
+    #                          treated (1,0) as an acceptable stop, it would return
+    #                          early there instead of continuing to (2,0).
+    for t in [(0, 0), (1, 0), (2, 0)]:
+        door_room.mark_floor(t)
+    path = door_room.find_path((0, 0), (2, 0))
+    assert path == ["right", "right"], path   # must reach the door tile itself
+
+    # No route through unknown territory: floor doesn't connect start to goal.
+    disconnected = RoomMap()
+    disconnected.mark_floor((0, 0))
+    disconnected.mark_floor((5, 5))           # an island, never adjacent to (0,0)
+    assert disconnected.find_path((0, 0), (5, 5)) is None
+
+    # A fenced doorway blocks BFS traversal, same as nearest_frontier above.
+    fenced = RoomMap()
+    fenced.mark_floor((0, 0))
+    fenced.mark_floor((1, 0))
+    fenced.mark_door((1, 0))                  # the only route out is fenced
+    fenced.mark_floor((2, 0))
+    assert fenced.find_path((0, 0), (2, 0)) is None
+
     print("PASS")
 
 

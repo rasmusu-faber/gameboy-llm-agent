@@ -378,23 +378,88 @@ def dismiss_dialog(pyboy, max_presses=10) -> bool:
     return not dialog_open(pyboy)
 
 
-def walk_to(pyboy, tx, ty, max_steps=80) -> bool:
-    """Greedy-walk the player to pixel coords (tx, ty).
+# Result of a crossing-aware walk_to(): `reached` mirrors the old boolean return,
+# `crossed` is True if the walk itself stepped through a real screen boundary
+# (an unguarded approach to a bad/guessed door coordinate could otherwise do this
+# silently - see the design-log entry on the un-settled walk_to bug), and `new_fp`
+# is the settled fingerprint of wherever the walk ended up.
+WalkResult = namedtuple("WalkResult", "reached crossed new_fp")
 
-    Returns True if reached, False if blocked (no gap-reducing move changed the
-    position - e.g. a wall or obstacle on every useful direction).
+
+def walk_to(pyboy, tx, ty, max_steps=80, ref_fp=None, room=None):
+    """Walk the player to pixel coords (tx, ty).
+
+    Without `ref_fp`: the original plain greedy behaviour, returns True if
+    reached, False if blocked (no gap-reducing move changed the position - e.g. a
+    wall). Used where the target is known to be on the current screen (a
+    same-room landmark in a test) and a boundary can't be in play.
+
+    With `ref_fp` (the fingerprint of the screen the walk starts on): routes every
+    move through the crossing-aware `step()` instead of a bare `press()`, and stops
+    the INSTANT a step crosses a real screen boundary rather than continuing to
+    walk blindly on the new screen - so a stale/guessed target coordinate that
+    happens to lie past a real door can no longer cross it uncredited. Returns a
+    `WalkResult`; the caller decides what a mid-walk crossing means for it.
+
+    `room` (a roommap.RoomMap for this scene, or None): if given, a real path is
+    tried FIRST over tiles this room has actually walked (`RoomMap.find_path`),
+    so a target on the far side of an obstacle (measured live: the town's south
+    door in Deadeus, see the design-log entry on the go_to loop) gets routed
+    AROUND it instead of the greedy walker just walking straight at it and
+    stopping dead the moment it's blocked. Every move made here - whichever branch
+    - is ALSO fed back into `room` (mark_floor/observe), so the map keeps growing
+    from ordinary go_to/interact traffic, not only from explicit `explore` passes -
+    that gap (an almost-empty RoomMap outside of `explore`) was why pathfinding had
+    nothing to work with the first time this was tried live.
     """
+    if ref_fp is None:
+        for _ in range(max_steps):
+            x, y = player_position(pyboy)
+            if (x, y) == (tx, ty):
+                return True
+            progressed = False
+            for move in _moves_toward(x, y, tx, ty):
+                before = player_position(pyboy)
+                press(pyboy, move)
+                if player_position(pyboy) != before:
+                    progressed = True
+                    break
+            if not progressed:
+                return False
+        return False
+
+    if room is not None:
+        room.mark_floor(player_tile(pyboy))
+        path = room.find_path(player_tile(pyboy), (tx // TILE, ty // TILE))
+        if path is not None:
+            for d in path:
+                before = player_tile(pyboy)
+                st = step(pyboy, d, ref_fp)
+                if st.crossed:
+                    return WalkResult(False, True, st.new_fp)
+                room.observe(before, player_tile(pyboy), d, 1 if st.moved else 0)
+                if not st.moved:            # the map was stale (something moved in,
+                    path = None             # or it was simply wrong) - abandon it and
+                    break                   # fall through to the blind greedy walk
+            if path is not None:
+                x, y = player_position(pyboy)
+                return WalkResult((x, y) == (tx, ty), False, ref_fp)
+
     for _ in range(max_steps):
         x, y = player_position(pyboy)
         if (x, y) == (tx, ty):
-            return True
+            return WalkResult(True, False, ref_fp)
         progressed = False
         for move in _moves_toward(x, y, tx, ty):
-            before = player_position(pyboy)
-            press(pyboy, move)
-            if player_position(pyboy) != before:
+            before = player_tile(pyboy)
+            st = step(pyboy, move, ref_fp)
+            if st.crossed:
+                return WalkResult(False, True, st.new_fp)
+            if room is not None:
+                room.observe(before, player_tile(pyboy), move, 1 if st.moved else 0)
+            if st.moved:
                 progressed = True
                 break
         if not progressed:
-            return False
-    return False
+            return WalkResult(False, False, ref_fp)
+    return WalkResult(False, False, ref_fp)

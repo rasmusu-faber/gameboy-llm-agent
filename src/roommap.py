@@ -108,6 +108,60 @@ class RoomMap:
                     return True
         return False
 
+    def find_path(self, start, goal) -> list[str] | None:
+        """BFS over KNOWN FLOOR tiles from `start` to `goal` - or, if `goal` itself
+        is NOT floor (an obstacle: a landmark's own tile, or a door threshold never
+        actually stepped on), to whichever of its floor-neighbours is nearest. That
+        mirrors walk_to's long-standing "stops ADJACENT to an obstacle" contract.
+
+        When `goal` IS known floor (a real, already-crossed door tile), the ONLY
+        acceptable stop is that exact tile, never a neighbour - measured live: a
+        door tile's neighbours are also valid floor, so treating them as
+        interchangeable stops let BFS settle for whichever one it reached first,
+        landing one tile short of the door. A caller then presses the recorded
+        crossing direction from there, missing the threshold entirely and falling
+        back to the sweep (see the design-log entry on this).
+
+        Returns the direction sequence to follow, or None if no route exists
+        through tiles this room has actually walked - NEVER routes through unknown
+        territory, since we have no idea whether it's safe. A caller should fall
+        back to the old blind greedy walk when this returns None (unmapped area,
+        or no RoomMap for this scene yet); see agent.py / navigation.walk_to.
+        """
+        start, goal = tuple(start), tuple(goal)
+        stops = {goal} if goal in self._floor else self._floor_neighbours(goal)
+        if start in stops:
+            return []
+        if not stops:
+            return None
+        prev = {start: None}                # tile -> (parent tile, direction taken)
+        q = deque([start])
+        target = None
+        while q:
+            tile = q.popleft()
+            if tile in stops:
+                target = tile
+                break
+            for d, (dx, dy) in _DELTA.items():
+                nbr = (tile[0] + dx, tile[1] + dy)
+                if nbr in self._floor and nbr not in self._doors and nbr not in prev:
+                    prev[nbr] = (tile, d)
+                    q.append(nbr)
+        if target is None:
+            return None
+        path = []
+        node = target
+        while prev[node] is not None:
+            parent, d = prev[node]
+            path.append(d)
+            node = parent
+        path.reverse()
+        return path
+
+    def _floor_neighbours(self, tile) -> set[tuple[int, int]]:
+        tile = tuple(tile)
+        return {(tile[0] + dx, tile[1] + dy) for dx, dy in _DELTA.values()} & self._floor
+
     def render(self, player, radius: int = 3) -> str:
         """ASCII mini-map centred on the player (up = north)."""
         px, py = player
